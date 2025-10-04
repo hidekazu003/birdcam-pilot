@@ -75,37 +75,24 @@ private enum class Screen {
 fun BirdPilotApp() {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val requiredPermissions = remember {
-        buildList {
-            add(Manifest.permission.CAMERA)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                add(Manifest.permission.READ_MEDIA_IMAGES)
-            } else {
-                add(Manifest.permission.READ_EXTERNAL_STORAGE)
-            }
-        }.distinct().toTypedArray()
-    }
+    val cameraPermission = Manifest.permission.CAMERA
 
     var allPermissionsGranted by remember {
         mutableStateOf(
-            requiredPermissions.all { permission ->
-                ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
-            }
+            ContextCompat.checkSelfPermission(context, cameraPermission) == PackageManager.PERMISSION_GRANTED
         )
     }
 
-    val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { result ->
-        allPermissionsGranted = requiredPermissions.all { permission ->
-            result[permission] == true ||
-                ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
-        }
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        allPermissionsGranted = granted ||
+            ContextCompat.checkSelfPermission(context, cameraPermission) == PackageManager.PERMISSION_GRANTED
     }
 
     LaunchedEffect(Unit) {
         if (!allPermissionsGranted) {
-            permissionLauncher.launch(requiredPermissions)
+            cameraPermissionLauncher.launch(cameraPermission)
         }
     }
 
@@ -117,13 +104,37 @@ fun BirdPilotApp() {
         }
     }
 
+    val galleryPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        Manifest.permission.READ_MEDIA_IMAGES
+    } else {
+        Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+
+    val galleryPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted || ContextCompat.checkSelfPermission(context, galleryPermission) == PackageManager.PERMISSION_GRANTED) {
+            currentScreen = Screen.Gallery
+        } else {
+            Toast.makeText(context, "写真へのアクセス許可が必要です", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val onGalleryClick = {
+        if (ContextCompat.checkSelfPermission(context, galleryPermission) == PackageManager.PERMISSION_GRANTED) {
+            currentScreen = Screen.Gallery
+        } else {
+            galleryPermissionLauncher.launch(galleryPermission)
+        }
+    }
+
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
             if (allPermissionsGranted) {
                 when (currentScreen) {
                     Screen.Camera -> CameraPreview(
                         lifecycleOwner = lifecycleOwner,
-                        onGalleryClick = { currentScreen = Screen.Gallery }
+                        onGalleryClick = onGalleryClick
                     )
 
                     Screen.Gallery -> GalleryScreen(
@@ -132,7 +143,7 @@ fun BirdPilotApp() {
                 }
             } else {
                 PermissionRequestView(onRequestPermission = {
-                    permissionLauncher.launch(requiredPermissions)
+                    cameraPermissionLauncher.launch(cameraPermission)
                 })
             }
         }

@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.MediaStore
 import android.util.Size
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -53,11 +54,21 @@ fun GalleryScreen(onBack: () -> Unit) {
     val imageUris = remember { mutableStateListOf<Uri>() }
 
     LaunchedEffect(Unit) {
-        val uris = withContext(Dispatchers.IO) {
-            loadLatestImages(context)
+        val result = runCatching {
+            withContext(Dispatchers.IO) {
+                loadLatestImages(context)
+            }
         }
-        imageUris.clear()
-        imageUris.addAll(uris)
+
+        result.onSuccess { uris ->
+            imageUris.clear()
+            imageUris.addAll(uris)
+        }.onFailure { throwable ->
+            if (throwable is SecurityException) {
+                Toast.makeText(context, "写真へのアクセス許可が必要です", Toast.LENGTH_SHORT).show()
+                onBack()
+            }
+        }
     }
 
     Surface(color = Color.Black, modifier = Modifier.fillMaxSize()) {
@@ -143,9 +154,9 @@ private fun GalleryThumbnail(uri: Uri) {
 
 private fun loadLatestImages(context: Context): List<Uri> {
     val projection = arrayOf(MediaStore.Images.Media._ID)
-    val selection = "${MediaStore.Images.Media.RELATIVE_PATH} = ?"
-    val selectionArgs = arrayOf("DCIM/BirdCam")
-    val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} DESC LIMIT 20"
+    val selection = "(${MediaStore.Images.Media.RELATIVE_PATH} LIKE ? OR ${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?)"
+    val selectionArgs = arrayOf("DCIM/BirdCam%", "BirdCam")
+    val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} DESC"
 
     val uris = mutableListOf<Uri>()
     context.contentResolver.query(
@@ -156,7 +167,7 @@ private fun loadLatestImages(context: Context): List<Uri> {
         sortOrder
     )?.use { cursor ->
         val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-        while (cursor.moveToNext()) {
+        while (cursor.moveToNext() && uris.size < 20) {
             val id = cursor.getLong(idColumn)
             val contentUri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
             uris.add(contentUri)
