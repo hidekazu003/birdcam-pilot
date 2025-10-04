@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.view.Surface
@@ -45,7 +46,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
@@ -63,38 +66,73 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private enum class Screen {
+    Camera,
+    Gallery
+}
+
 @Composable
 fun BirdPilotApp() {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    var hasCameraPermission by remember {
+    val requiredPermissions = remember {
+        buildList {
+            add(Manifest.permission.CAMERA)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.READ_MEDIA_IMAGES)
+            } else {
+                add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+        }.distinct().toTypedArray()
+    }
+
+    var allPermissionsGranted by remember {
         mutableStateOf(
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.CAMERA
-            ) == PackageManager.PERMISSION_GRANTED
+            requiredPermissions.all { permission ->
+                ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+            }
         )
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        hasCameraPermission = granted
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        allPermissionsGranted = requiredPermissions.all { permission ->
+            result[permission] == true ||
+                ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+        }
     }
 
-    LaunchedEffect(hasCameraPermission) {
-        if (!hasCameraPermission) {
-            permissionLauncher.launch(Manifest.permission.CAMERA)
+    LaunchedEffect(Unit) {
+        if (!allPermissionsGranted) {
+            permissionLauncher.launch(requiredPermissions)
+        }
+    }
+
+    var currentScreen by remember { mutableStateOf(Screen.Camera) }
+
+    LaunchedEffect(allPermissionsGranted) {
+        if (!allPermissionsGranted) {
+            currentScreen = Screen.Camera
         }
     }
 
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
-            if (hasCameraPermission) {
-                CameraPreview(lifecycleOwner = lifecycleOwner)
+            if (allPermissionsGranted) {
+                when (currentScreen) {
+                    Screen.Camera -> CameraPreview(
+                        lifecycleOwner = lifecycleOwner,
+                        onGalleryClick = { currentScreen = Screen.Gallery }
+                    )
+
+                    Screen.Gallery -> GalleryScreen(
+                        onBack = { currentScreen = Screen.Camera }
+                    )
+                }
             } else {
                 PermissionRequestView(onRequestPermission = {
-                    permissionLauncher.launch(Manifest.permission.CAMERA)
+                    permissionLauncher.launch(requiredPermissions)
                 })
             }
         }
@@ -115,7 +153,7 @@ private fun PermissionRequestView(onRequestPermission: () -> Unit) {
             modifier = Modifier.padding(24.dp)
         ) {
             Text(
-                text = "カメラ権限が必要です",
+                text = "カメラ撮影とギャラリー表示には権限が必要です",
                 color = Color.White
             )
             Button(onClick = onRequestPermission) {
@@ -126,7 +164,10 @@ private fun PermissionRequestView(onRequestPermission: () -> Unit) {
 }
 
 @Composable
-private fun CameraPreview(lifecycleOwner: LifecycleOwner) {
+private fun CameraPreview(
+    lifecycleOwner: LifecycleOwner,
+    onGalleryClick: () -> Unit
+) {
     val context = LocalContext.current
     val previewView = remember {
         PreviewView(context).apply {
@@ -170,6 +211,13 @@ private fun CameraPreview(lifecycleOwner: LifecycleOwner) {
             factory = { previewView }
         )
 
+        GalleryButton(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(24.dp),
+            onClick = onGalleryClick
+        )
+
         ShutterButton(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -182,6 +230,29 @@ private fun CameraPreview(lifecycleOwner: LifecycleOwner) {
                 rotation = previewView.display?.rotation ?: Surface.ROTATION_0
             )
         }
+    }
+}
+
+@Composable
+private fun GalleryButton(
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.4f))
+            .border(width = 1.dp, color = Color.White, shape = CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = "🖼",
+            color = Color.White,
+            fontSize = 20.sp,
+            textAlign = TextAlign.Center
+        )
     }
 }
 
