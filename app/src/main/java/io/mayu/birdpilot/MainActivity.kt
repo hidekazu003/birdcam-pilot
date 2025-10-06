@@ -1,6 +1,7 @@
 package io.mayu.birdpilot
 
 import android.Manifest
+import android.app.Activity
 import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
@@ -15,10 +16,12 @@ import android.util.Log
 import android.view.KeyEvent
 import android.view.Surface
 import android.widget.Toast
+import android.net.Uri
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.IntentSenderRequest
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
@@ -252,6 +255,23 @@ fun BirdPilotApp() {
     }
 
     var currentScreen by remember { mutableStateOf(Screen.Camera) }
+    var selectedPhoto by remember { mutableStateOf<Uri?>(null) }
+    var galleryReloadSignal by remember { mutableStateOf(0) }
+    var pendingDeleteCallback by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var pendingDeleteUri by remember { mutableStateOf<Uri?>(null) }
+
+    val deleteRequestLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        val callback = pendingDeleteCallback
+        if (result.resultCode == Activity.RESULT_OK) {
+            callback?.invoke()
+        } else if (pendingDeleteUri != null) {
+            Toast.makeText(context, "削除がキャンセルされました", Toast.LENGTH_SHORT).show()
+        }
+        pendingDeleteCallback = null
+        pendingDeleteUri = null
+    }
 
     LaunchedEffect(allPermissionsGranted) {
         if (!allPermissionsGranted) {
@@ -287,17 +307,66 @@ fun BirdPilotApp() {
         }
     }
 
+    val deleteWithConsent: (Uri) -> Unit = { uri ->
+        val resolver = context.contentResolver
+        val onSuccess = {
+            selectedPhoto = null
+            galleryReloadSignal++
+            Toast.makeText(context, "写真を削除しました", Toast.LENGTH_SHORT).show()
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            pendingDeleteCallback = {
+                onSuccess()
+                pendingDeleteCallback = null
+                pendingDeleteUri = null
+            }
+            pendingDeleteUri = uri
+            runCatching {
+                val request = MediaStore.createDeleteRequest(resolver, listOf(uri))
+                val intentSender = IntentSenderRequest.Builder(request.intentSender).build()
+                deleteRequestLauncher.launch(intentSender)
+            }.onFailure {
+                pendingDeleteCallback = null
+                pendingDeleteUri = null
+                Toast.makeText(context, "削除に失敗しました", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            try {
+                val deleted = resolver.delete(uri, null, null) > 0
+                if (deleted) {
+                    onSuccess()
+                } else {
+                    Toast.makeText(context, "削除できませんでした", Toast.LENGTH_SHORT).show()
+                }
+            } catch (throwable: SecurityException) {
+                Toast.makeText(context, "削除に失敗しました", Toast.LENGTH_SHORT).show()
+            } catch (throwable: Exception) {
+                Toast.makeText(context, "削除に失敗しました", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
             if (allPermissionsGranted) {
-                when (currentScreen) {
-                    Screen.Camera -> CameraPreview(
+                when {
+                    selectedPhoto != null -> PhotoViewerScreen(
+                        uri = selectedPhoto!!,
+                        onBack = { selectedPhoto = null },
+                        onDelete = { deleteWithConsent(it) }
+                    )
+
+                    currentScreen == Screen.Camera -> CameraPreview(
                         lifecycleOwner = lifecycleOwner,
                         onGalleryClick = onGalleryClick
                     )
 
-                    Screen.Gallery -> GalleryScreen(
-                        onBack = { currentScreen = Screen.Camera }
+                    currentScreen == Screen.Gallery -> GalleryScreen(
+                        onBack = { currentScreen = Screen.Camera },
+                        onOpen = { selectedPhoto = it },
+                        onDelete = { deleteWithConsent(it) },
+                        reloadSignal = galleryReloadSignal
                     )
                 }
             } else {
