@@ -5,4 +5,6 @@
 - Photo delete（Android 11+ システム確認ダイアログ）
 - Tap-to-Focus（AE/AF lock + フォーカスリング）／撮影後もプレビュー継続
 - ズーム倍率表示 / グリッド(三分割) トグル
+- Double-tap to reset zoom to x1.0
+- Zoom/grid overlays: unchanged & compatible（no overlap）
 - Verified: OPPO / Android 12
