@@ -46,6 +46,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -642,31 +643,19 @@ private fun CameraPreview(
 
         val overlayAlpha = zoomOverlayAlpha.value
 
-        if (overlayAlpha > 0.001f) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(top = 16.dp, end = 16.dp)
-                    .graphicsLayer { alpha = overlayAlpha }
-                    .clip(CircleShape)
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-            ) {
-                Text(
-                    text = "x${String.format(Locale.US, "%.1f", zoomRatio)}",
-                    color = Color.White,
-                    fontSize = 16.sp
-                )
-            }
-        }
-
         Column(
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(24.dp),
+                .statusBarsPadding()
+                .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
             horizontalAlignment = Alignment.End
         ) {
+            ZoomIndicator(
+                zoomRatio = zoomRatio,
+                alpha = overlayAlpha
+            )
+
             GridToggleButton(
                 isEnabled = showGrid,
                 onToggle = { showGrid = !showGrid }
@@ -706,6 +695,29 @@ private fun GridToggleButton(
             color = Color.White,
             fontSize = 20.sp,
             textAlign = TextAlign.Center
+        )
+    }
+}
+
+@Composable
+private fun ZoomIndicator(
+    zoomRatio: Float,
+    alpha: Float
+) {
+    if (alpha <= 0.001f) {
+        return
+    }
+    Box(
+        modifier = Modifier
+            .graphicsLayer { this.alpha = alpha }
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.6f))
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+    ) {
+        Text(
+            text = "x${String.format(Locale.US, "%.1f", zoomRatio)}",
+            color = Color.White,
+            fontSize = 16.sp
         )
     }
 }
