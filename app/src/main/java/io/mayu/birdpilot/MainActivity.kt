@@ -35,6 +35,7 @@ import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.core.ZoomState
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -440,6 +441,7 @@ private fun CameraPreview(
     var camera by remember { mutableStateOf<Camera?>(null) }
     var focusRingPosition by remember { mutableStateOf<Offset?>(null) }
     var linearZoom by remember { mutableStateOf(0f) }
+    var showGrid by remember { mutableStateOf(false) }
 
     LaunchedEffect(focusRingPosition) {
         val current = focusRingPosition ?: return@LaunchedEffect
@@ -561,6 +563,40 @@ private fun CameraPreview(
             factory = { previewView }
         )
 
+        if (showGrid) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val lineColor = Color.White.copy(alpha = 0.4f)
+                val strokeWidth = 2.dp.toPx()
+                val thirdWidth = size.width / 3f
+                val thirdHeight = size.height / 3f
+
+                drawLine(
+                    color = lineColor,
+                    start = Offset(thirdWidth, 0f),
+                    end = Offset(thirdWidth, size.height),
+                    strokeWidth = strokeWidth
+                )
+                drawLine(
+                    color = lineColor,
+                    start = Offset(2f * thirdWidth, 0f),
+                    end = Offset(2f * thirdWidth, size.height),
+                    strokeWidth = strokeWidth
+                )
+                drawLine(
+                    color = lineColor,
+                    start = Offset(0f, thirdHeight),
+                    end = Offset(size.width, thirdHeight),
+                    strokeWidth = strokeWidth
+                )
+                drawLine(
+                    color = lineColor,
+                    start = Offset(0f, 2f * thirdHeight),
+                    end = Offset(size.width, 2f * thirdHeight),
+                    strokeWidth = strokeWidth
+                )
+            }
+        }
+
         focusRingPosition?.let { position ->
             val focusSize = 72.dp
             val offset = with(density) {
@@ -576,12 +612,22 @@ private fun CameraPreview(
             )
         }
 
-        GalleryButton(
+        Column(
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(24.dp),
-            onClick = onGalleryClick
-        )
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalAlignment = Alignment.End
+        ) {
+            GridToggleButton(
+                isEnabled = showGrid,
+                onToggle = { showGrid = !showGrid }
+            )
+
+            GalleryButton(
+                onClick = onGalleryClick
+            )
+        }
 
         ShutterButton(
             modifier = Modifier
@@ -590,6 +636,29 @@ private fun CameraPreview(
         ) {
             activity?.requestCapture()
         }
+    }
+}
+
+@Composable
+private fun GridToggleButton(
+    isEnabled: Boolean,
+    onToggle: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.4f))
+            .border(width = 1.dp, color = Color.White, shape = CircleShape)
+            .clickable(onClick = onToggle),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = if (isEnabled) "▦" else "▢",
+            color = Color.White,
+            fontSize = 20.sp,
+            textAlign = TextAlign.Center
+        )
     }
 }
 
