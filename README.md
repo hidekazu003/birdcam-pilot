@@ -1,4 +1,4 @@
-## BirdCam Pilot v0.1
+## BirdCam Pilot v0.1.2
 
 - Volume Up shutter（500msスロットル）→ MediaStore `DCIM/BirdCam` / Toast “Saved”
 - Gallery（BirdCamのみ）: サムネ → タップで全画面（ピンチズーム/ドラッグ/ダブルタップ）
