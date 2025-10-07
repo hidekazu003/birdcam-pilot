@@ -4,4 +4,5 @@
 - Gallery（BirdCamのみ）: サムネ → タップで全画面（ピンチズーム/ドラッグ/ダブルタップ）
 - Photo delete（Android 11+ システム確認ダイアログ）
 - Tap-to-Focus（AE/AF lock + フォーカスリング）／撮影後もプレビュー継続
+- ズーム倍率表示 / グリッド(三分割) トグル
 - Verified: OPPO / Android 12
