@@ -51,17 +51,21 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -84,7 +88,9 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private var previewView: PreviewView? = null
@@ -441,7 +447,11 @@ private fun CameraPreview(
     var camera by remember { mutableStateOf<Camera?>(null) }
     var focusRingPosition by remember { mutableStateOf<Offset?>(null) }
     var linearZoom by remember { mutableStateOf(0f) }
+    var zoomRatio by remember { mutableStateOf(1f) }
     var showGrid by remember { mutableStateOf(false) }
+    val zoomOverlayAlpha = remember { Animatable(0f) }
+    var fadeZoomJob by remember { mutableStateOf<Job?>(null) }
+    val coroutineScope = rememberCoroutineScope()
 
     LaunchedEffect(focusRingPosition) {
         val current = focusRingPosition ?: return@LaunchedEffect
@@ -488,6 +498,7 @@ private fun CameraPreview(
         val boundCamera = camera ?: return@DisposableEffect onDispose {}
         val observer = Observer<ZoomState> { zoomState ->
             linearZoom = zoomState.linearZoom.coerceIn(0f, 1f)
+            zoomRatio = zoomState.zoomRatio
         }
         boundCamera.cameraInfo.zoomState.observe(lifecycleOwner, observer)
         onDispose {
@@ -541,7 +552,24 @@ private fun CameraPreview(
                 }
 
                 override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
-                    return currentCamera.value != null
+                    if (currentCamera.value != null) {
+                        coroutineScope.launch {
+                            fadeZoomJob?.cancel()
+                            fadeZoomJob = null
+                            zoomOverlayAlpha.animateTo(1f, tween(durationMillis = 150))
+                        }
+                        return true
+                    }
+                    return false
+                }
+
+                override fun onScaleEnd(detector: ScaleGestureDetector) {
+                    fadeZoomJob?.cancel()
+                    fadeZoomJob = coroutineScope.launch {
+                        delay(1_000)
+                        zoomOverlayAlpha.animateTo(0f, tween(durationMillis = 300))
+                        fadeZoomJob = null
+                    }
                 }
             }
         )
@@ -610,6 +638,26 @@ private fun CameraPreview(
                     .clip(CircleShape)
                     .border(width = 2.dp, color = Color.White, shape = CircleShape)
             )
+        }
+
+        val overlayAlpha = zoomOverlayAlpha.value
+
+        if (overlayAlpha > 0.001f) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 16.dp, end = 16.dp)
+                    .graphicsLayer { alpha = overlayAlpha }
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = "x${String.format(Locale.US, "%.1f", zoomRatio)}",
+                    color = Color.White,
+                    fontSize = 16.sp
+                )
+            }
         }
 
         Column(
