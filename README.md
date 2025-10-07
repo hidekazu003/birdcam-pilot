@@ -7,4 +7,5 @@
 - ズーム倍率表示 / グリッド(三分割) トグル
 - Double-tap to reset zoom to x1.0
 - Zoom/grid overlays: unchanged & compatible（no overlap）
+- グリッド表示ON/OFFを記憶（再起動後も反映）
 - Verified: OPPO / Android 12
