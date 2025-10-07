@@ -3,6 +3,7 @@ package io.mayu.birdpilot
 import android.Manifest
 import android.app.Activity
 import android.content.ContentValues
+import android.content.Context
 import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
 import android.os.Build
@@ -63,6 +64,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -80,6 +82,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Observer
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.preferencesDataStore
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -92,6 +97,10 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.map
+
+private val Context.gridPreferenceDataStore by preferencesDataStore(name = "camera_preferences")
+private val GRID_ENABLED_KEY = booleanPreferencesKey("grid_enabled")
 
 class MainActivity : ComponentActivity() {
     private var previewView: PreviewView? = null
@@ -449,10 +458,14 @@ private fun CameraPreview(
     var focusRingPosition by remember { mutableStateOf<Offset?>(null) }
     var linearZoom by remember { mutableStateOf(0f) }
     var zoomRatio by remember { mutableStateOf(1f) }
-    var showGrid by remember { mutableStateOf(false) }
     val zoomOverlayAlpha = remember { Animatable(0f) }
     var fadeZoomJob by remember { mutableStateOf<Job?>(null) }
     val coroutineScope = rememberCoroutineScope()
+    val dataStore = remember(context) { context.gridPreferenceDataStore }
+    val showGridFlow = remember(dataStore) {
+        dataStore.data.map { preferences -> preferences[GRID_ENABLED_KEY] ?: false }
+    }
+    val showGrid by showGridFlow.collectAsState(initial = false)
 
     LaunchedEffect(focusRingPosition) {
         val current = focusRingPosition ?: return@LaunchedEffect
@@ -664,7 +677,13 @@ private fun CameraPreview(
 
             GridToggleButton(
                 isEnabled = showGrid,
-                onToggle = { showGrid = !showGrid }
+                onToggle = {
+                    coroutineScope.launch {
+                        dataStore.edit { preferences ->
+                            preferences[GRID_ENABLED_KEY] = !showGrid
+                        }
+                    }
+                }
             )
 
             GalleryButton(
