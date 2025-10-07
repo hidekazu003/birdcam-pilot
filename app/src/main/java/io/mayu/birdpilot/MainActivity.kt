@@ -534,6 +534,12 @@ private fun CameraPreview(
                     focusRingPosition = Offset(e.x, e.y)
                     return true
                 }
+
+                override fun onDoubleTap(e: MotionEvent): Boolean {
+                    val cam = currentCamera.value ?: return false
+                    cam.cameraControl.setLinearZoom(0f)
+                    return true
+                }
             }
         )
 
