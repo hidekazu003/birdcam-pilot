@@ -13,7 +13,10 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
+import android.view.GestureDetector
 import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.Surface
 import android.widget.Toast
 import android.net.Uri
@@ -22,10 +25,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.IntentSenderRequest
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
+import androidx.camera.core.SurfaceOrientedMeteringPointFactory
+import androidx.camera.core.ZoomState
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
@@ -37,6 +44,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -48,6 +56,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,19 +64,26 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.Observer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
     private var previewView: PreviewView? = null
@@ -408,6 +424,9 @@ private fun CameraPreview(
     onGalleryClick: () -> Unit
 ) {
     val context = LocalContext.current
+    val activity = context as? MainActivity
+    val executor = remember { ContextCompat.getMainExecutor(context) }
+    val density = LocalDensity.current
     val previewView = remember {
         PreviewView(context).apply {
             scaleType = PreviewView.ScaleType.FILL_CENTER
@@ -417,6 +436,17 @@ private fun CameraPreview(
         ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
             .build()
+    }
+    var camera by remember { mutableStateOf<Camera?>(null) }
+    var focusRingPosition by remember { mutableStateOf<Offset?>(null) }
+    var linearZoom by remember { mutableStateOf(0f) }
+
+    LaunchedEffect(focusRingPosition) {
+        val current = focusRingPosition ?: return@LaunchedEffect
+        delay(3_000)
+        if (focusRingPosition == current) {
+            focusRingPosition = null
+        }
     }
 
     DisposableEffect(activity, previewView, imageCapture) {
@@ -440,13 +470,84 @@ private fun CameraPreview(
             imageCapture.targetRotation = previewView.display?.rotation ?: Surface.ROTATION_0
 
             cameraProvider?.unbindAll()
-            cameraProvider?.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
+            val boundCamera = cameraProvider?.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
+            camera = boundCamera
         }
 
         cameraProviderFuture.addListener(listener, executor)
 
         onDispose {
             cameraProvider?.unbindAll()
+            camera = null
+        }
+    }
+
+    DisposableEffect(camera, lifecycleOwner) {
+        val boundCamera = camera ?: return@DisposableEffect onDispose {}
+        val observer = Observer<ZoomState> { zoomState ->
+            linearZoom = zoomState.linearZoom.coerceIn(0f, 1f)
+        }
+        boundCamera.cameraInfo.zoomState.observe(lifecycleOwner, observer)
+        onDispose {
+            boundCamera.cameraInfo.zoomState.removeObserver(observer)
+        }
+    }
+
+    val currentCamera = rememberUpdatedState(camera)
+    val currentLinearZoom = rememberUpdatedState(linearZoom)
+
+    DisposableEffect(previewView) {
+        var initialZoom = 0f
+        val scaleGestureDetector = ScaleGestureDetector(
+            context,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                    initialZoom = currentLinearZoom.value
+                    return true
+                }
+
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    val cam = currentCamera.value ?: return false
+                    val newZoom = (initialZoom * detector.scaleFactor).coerceIn(0f, 1f)
+                    cam.cameraControl.setLinearZoom(newZoom)
+                    return true
+                }
+            }
+        )
+        val tapGestureDetector = GestureDetector(
+            context,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onSingleTapUp(e: MotionEvent): Boolean {
+                    val cam = currentCamera.value ?: return false
+                    if (previewView.width == 0 || previewView.height == 0) {
+                        return false
+                    }
+                    val factory = SurfaceOrientedMeteringPointFactory(
+                        previewView.width.toFloat(),
+                        previewView.height.toFloat()
+                    )
+                    val point = factory.createPoint(e.x, e.y)
+                    val action = FocusMeteringAction.Builder(
+                        point,
+                        FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+                    )
+                        .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                        .build()
+                    cam.cameraControl.startFocusAndMetering(action)
+                    focusRingPosition = Offset(e.x, e.y)
+                    return true
+                }
+            }
+        )
+
+        previewView.setOnTouchListener { _, event ->
+            val handledScale = scaleGestureDetector.onTouchEvent(event)
+            val handledTap = tapGestureDetector.onTouchEvent(event)
+            handledScale || handledTap
+        }
+
+        onDispose {
+            previewView.setOnTouchListener(null)
         }
     }
 
@@ -455,6 +556,21 @@ private fun CameraPreview(
             modifier = Modifier.fillMaxSize(),
             factory = { previewView }
         )
+
+        focusRingPosition?.let { position ->
+            val focusSize = 72.dp
+            val offset = with(density) {
+                val half = focusSize.toPx() / 2f
+                IntOffset((position.x - half).roundToInt(), (position.y - half).roundToInt())
+            }
+            Box(
+                modifier = Modifier
+                    .offset { offset }
+                    .size(focusSize)
+                    .clip(CircleShape)
+                    .border(width = 2.dp, color = Color.White, shape = CircleShape)
+            )
+        }
 
         GalleryButton(
             modifier = Modifier
