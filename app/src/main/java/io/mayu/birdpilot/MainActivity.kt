@@ -6,6 +6,10 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Matrix
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Build
@@ -100,8 +104,10 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -454,6 +460,13 @@ private fun CameraPreview(
     val activity = context as? MainActivity
     val executor = remember { ContextCompat.getMainExecutor(context) }
     val density = LocalDensity.current
+    val sensorManager = remember(context) {
+        context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+    }
+    val gyroSensor = remember(sensorManager) {
+        sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+    }
+    var gyroOmega by remember { mutableStateOf(0f) }
     val previewView = remember {
         PreviewView(context).apply {
             scaleType = PreviewView.ScaleType.FILL_CENTER
@@ -501,6 +514,35 @@ private fun CameraPreview(
         ) { result ->
             finderResult = result
         }
+    }
+    DisposableEffect(sensorManager, gyroSensor, finderEnabled) {
+        if (!finderEnabled || sensorManager == null || gyroSensor == null) {
+            gyroOmega = 0f
+            return@DisposableEffect onDispose {}
+        }
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent) {
+                val values = event.values
+                if (values.size >= 3) {
+                    val omega = sqrt(
+                        values[0] * values[0] +
+                            values[1] * values[1] +
+                            values[2] * values[2]
+                    )
+                    gyroOmega = omega
+                }
+            }
+
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+        }
+        sensorManager.registerListener(listener, gyroSensor, SensorManager.SENSOR_DELAY_GAME)
+        onDispose {
+            sensorManager.unregisterListener(listener)
+            gyroOmega = 0f
+        }
+    }
+    LaunchedEffect(finderAnalyzer, gyroOmega) {
+        finderAnalyzer.setGyroOmega(gyroOmega)
     }
     DisposableEffect(Unit) {
         onDispose {
@@ -957,11 +999,9 @@ private class FinderAnalyzer(
     private val mainExecutor: Executor,
     private val onResult: (FinderResult?) -> Unit
 ) : ImageAnalysis.Analyzer {
-    private val ACTIVE_RATIO_MAX = 0.08f
     private val MIN_AREA_FRAC = 0.008f
     private val MAX_AREA_FRAC = 0.15f
     private val STABILITY_RADIUS_F = 0.05f
-    private val STABILITY_REQUIRED = 2
     private var previousFrame: ByteArray? = null
     private var emaX: Float? = null
     private var emaY: Float? = null
@@ -972,6 +1012,8 @@ private class FinderAnalyzer(
     private var lastAcceptedX: Float? = null
     private var lastAcceptedY: Float? = null
     private var stableCount: Int = 0
+    @Volatile
+    private var gyroOmega: Float = 0f
 
     fun reset() {
         previousFrame = null
@@ -981,10 +1023,15 @@ private class FinderAnalyzer(
         lastAcceptedX = null
         lastAcceptedY = null
         stableCount = 0
+        gyroOmega = 0f
         if (hasLastResult) {
             hasLastResult = false
             mainExecutor.execute { onResult(null) }
         }
+    }
+
+    fun setGyroOmega(omega: Float) {
+        gyroOmega = omega
     }
 
     override fun analyze(image: ImageProxy) {
@@ -994,6 +1041,16 @@ private class FinderAnalyzer(
                 return
             }
             lastAnalysisTime = now
+
+            val omega = gyroOmega
+            if (omega >= 1.2f) {
+                dispatchNull()
+                lastAnalysisTime = now + 100L
+                return
+            }
+            val omegaClamped = min(1.2f, max(0f, omega))
+            val activeRatioMax = 0.10f + 0.15f * (omegaClamped / 1.2f)
+            val stabilityRequired = if (omega >= 0.5f) 2 else 1
 
             val width = image.width
             val height = image.height
@@ -1042,7 +1099,7 @@ private class FinderAnalyzer(
             }
 
             val activeRatio = onCount.toFloat() / totalPixels
-            if (activeRatio > ACTIVE_RATIO_MAX) {
+            if (activeRatio > activeRatioMax) {
                 emaX = null
                 emaY = null
                 lastAcceptedX = null
@@ -1094,13 +1151,13 @@ private class FinderAnalyzer(
                     1
                 }
             }
-            if (stableCount > STABILITY_REQUIRED) {
-                stableCount = STABILITY_REQUIRED
+            if (stableCount > stabilityRequired) {
+                stableCount = stabilityRequired
             }
             lastAcceptedX = normalizedX
             lastAcceptedY = normalizedY
 
-            if (stableCount < STABILITY_REQUIRED) {
+            if (stableCount < stabilityRequired) {
                 dispatchNull()
                 return
             }
