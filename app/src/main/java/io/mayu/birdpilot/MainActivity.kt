@@ -58,12 +58,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -108,19 +108,15 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private val Context.gridPreferenceDataStore by preferencesDataStore(name = "camera_preferences")
 private val GRID_ENABLED_KEY = booleanPreferencesKey("grid_enabled")
-
-private fun interface FlashAnimator {
-    fun triggerFlash()
-}
 
 class MainActivity : ComponentActivity() {
     private var previewView: PreviewView? = null
@@ -131,7 +127,7 @@ class MainActivity : ComponentActivity() {
     private var lastShotAt: Long = 0L
     private var isCameraScreenVisible: Boolean = false
     private lateinit var displayManager: DisplayManager
-    private var flashAnimator: FlashAnimator? = null
+    private var flashListener: (() -> Unit)? = null
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = Unit
 
@@ -199,13 +195,13 @@ class MainActivity : ComponentActivity() {
         isCameraScreenVisible = visible
     }
 
-    fun registerFlashAnimator(animator: FlashAnimator) {
-        flashAnimator = animator
+    fun registerFlashListener(listener: () -> Unit) {
+        flashListener = listener
     }
 
-    fun unregisterFlashAnimator(animator: FlashAnimator) {
-        if (flashAnimator === animator) {
-            flashAnimator = null
+    fun unregisterFlashListener(listener: () -> Unit) {
+        if (flashListener === listener) {
+            flashListener = null
         }
     }
 
@@ -250,7 +246,7 @@ class MainActivity : ComponentActivity() {
                     mainExecutor,
                     object : ImageCapture.OnImageSavedCallback {
                         override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                            flashAnimator?.triggerFlash()
+                            flashListener?.invoke()
                             Toast.makeText(this@MainActivity, "Saved", Toast.LENGTH_SHORT).show()
                             isCapturing.set(false)
                         }
@@ -504,7 +500,7 @@ private fun CameraPreview(
     val flashAlpha = remember { Animatable(0f) }
     var fadeZoomJob by remember { mutableStateOf<Job?>(null) }
     var flashJob by remember { mutableStateOf<Job?>(null) }
-    val coroutineScope = rememberCoroutineScope()
+    val scope = rememberCoroutineScope()
     val dataStore = remember(context) { context.gridPreferenceDataStore }
     val showGridFlow = remember(dataStore) {
         dataStore.data.map { preferences -> preferences[GRID_ENABLED_KEY] ?: false }
@@ -609,29 +605,32 @@ private fun CameraPreview(
         }
     }
 
-    DisposableEffect(activity, coroutineScope) {
+    DisposableEffect(activity, scope) {
         if (activity == null) {
             onDispose {
                 flashJob?.cancel()
                 flashJob = null
             }
         } else {
-            val animator = FlashAnimator {
-                flashJob?.cancel()
-                flashJob = coroutineScope.launch {
-                    try {
-                        flashAlpha.animateTo(1f, tween(durationMillis = 120))
-                        flashAlpha.animateTo(0f, tween(durationMillis = 180))
-                    } finally {
-                        flashJob = null
+            val listener: () -> Unit = {
+                scope.launch {
+                    flashJob?.cancel()
+                    flashJob = launch {
+                        try {
+                            flashAlpha.snapTo(0f)
+                            flashAlpha.animateTo(1f, tween(120))
+                            flashAlpha.animateTo(0f, tween(180))
+                        } finally {
+                            flashJob = null
+                        }
                     }
                 }
             }
-            activity.registerFlashAnimator(animator)
+            activity.registerFlashListener(listener)
             onDispose {
                 flashJob?.cancel()
                 flashJob = null
-                activity.unregisterFlashAnimator(animator)
+                activity.unregisterFlashListener(listener)
             }
         }
     }
@@ -750,7 +749,7 @@ private fun CameraPreview(
 
                 override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
                     if (currentCamera.value != null) {
-                        coroutineScope.launch {
+                        scope.launch {
                             fadeZoomJob?.cancel()
                             fadeZoomJob = null
                             zoomOverlayAlpha.animateTo(1f, tween(durationMillis = 150))
@@ -762,7 +761,7 @@ private fun CameraPreview(
 
                 override fun onScaleEnd(detector: ScaleGestureDetector) {
                     fadeZoomJob?.cancel()
-                    fadeZoomJob = coroutineScope.launch {
+                    fadeZoomJob = scope.launch {
                         delay(1_000)
                         zoomOverlayAlpha.animateTo(0f, tween(durationMillis = 300))
                         fadeZoomJob = null
@@ -879,7 +878,7 @@ private fun CameraPreview(
             GridToggleButton(
                 isEnabled = showGrid,
                 onToggle = {
-                    coroutineScope.launch {
+                    scope.launch {
                         dataStore.edit { preferences ->
                             preferences[GRID_ENABLED_KEY] = !showGrid
                         }
@@ -903,9 +902,14 @@ private fun CameraPreview(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.White)
                 .graphicsLayer(alpha = flashAlpha.value)
-        )
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.White)
+            )
+        }
     }
 }
 
