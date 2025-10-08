@@ -11,7 +11,6 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.hardware.display.DisplayManager
-import android.media.MediaActionSound
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -59,12 +58,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -109,20 +108,15 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-val Context.cameraPreferenceDataStore by preferencesDataStore(name = "camera_preferences")
-val GRID_ENABLED_KEY = booleanPreferencesKey("grid_enabled")
-val SHUTTER_SOUND_KEY = booleanPreferencesKey("shutter_sound")
-
-private fun interface FlashAnimator {
-    fun triggerFlash()
-}
+private val Context.gridPreferenceDataStore by preferencesDataStore(name = "camera_preferences")
+private val GRID_ENABLED_KEY = booleanPreferencesKey("grid_enabled")
 
 class MainActivity : ComponentActivity() {
     private var previewView: PreviewView? = null
@@ -133,9 +127,7 @@ class MainActivity : ComponentActivity() {
     private var lastShotAt: Long = 0L
     private var isCameraScreenVisible: Boolean = false
     private lateinit var displayManager: DisplayManager
-    private var flashAnimator: FlashAnimator? = null
-    private var shutterSound: MediaActionSound? = null
-    private var shutterSoundEnabled: Boolean = false
+    private var flashListener: (() -> Unit)? = null
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = Unit
 
@@ -203,28 +195,14 @@ class MainActivity : ComponentActivity() {
         isCameraScreenVisible = visible
     }
 
-    fun registerFlashAnimator(animator: FlashAnimator) {
-        flashAnimator = animator
+    fun registerFlashListener(listener: () -> Unit) {
+        flashListener = listener
     }
 
-    fun unregisterFlashAnimator(animator: FlashAnimator) {
-        if (flashAnimator === animator) {
-            flashAnimator = null
+    fun unregisterFlashListener(listener: () -> Unit) {
+        if (flashListener === listener) {
+            flashListener = null
         }
-    }
-
-    fun registerShutterSound(sound: MediaActionSound) {
-        shutterSound = sound
-    }
-
-    fun unregisterShutterSound(sound: MediaActionSound) {
-        if (shutterSound === sound) {
-            shutterSound = null
-        }
-    }
-
-    fun setShutterSoundEnabled(enabled: Boolean) {
-        shutterSoundEnabled = enabled
     }
 
     fun requestCapture() {
@@ -268,10 +246,7 @@ class MainActivity : ComponentActivity() {
                     mainExecutor,
                     object : ImageCapture.OnImageSavedCallback {
                         override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                            flashAnimator?.triggerFlash()
-                            if (shutterSoundEnabled) {
-                                shutterSound?.play(MediaActionSound.SHUTTER_CLICK)
-                            }
+                            flashListener?.invoke()
                             Toast.makeText(this@MainActivity, "Saved", Toast.LENGTH_SHORT).show()
                             isCapturing.set(false)
                         }
@@ -311,8 +286,7 @@ class MainActivity : ComponentActivity() {
 
 private enum class Screen {
     Camera,
-    Gallery,
-    Settings
+    Gallery
 }
 
 @Composable
@@ -446,8 +420,7 @@ fun BirdPilotApp() {
 
                     currentScreen == Screen.Camera -> CameraPreview(
                         lifecycleOwner = lifecycleOwner,
-                        onGalleryClick = onGalleryClick,
-                        onSettingsClick = { currentScreen = Screen.Settings }
+                        onGalleryClick = onGalleryClick
                     )
 
                     currentScreen == Screen.Gallery -> GalleryScreen(
@@ -455,10 +428,6 @@ fun BirdPilotApp() {
                         onOpen = { selectedPhoto = it },
                         onDelete = { deleteWithConsent(it) },
                         reloadSignal = galleryReloadSignal
-                    )
-
-                    currentScreen == Screen.Settings -> SettingsScreen(
-                        onBack = { currentScreen = Screen.Camera }
                     )
                 }
             } else {
@@ -497,8 +466,7 @@ private fun PermissionRequestView(onRequestPermission: () -> Unit) {
 @Composable
 private fun CameraPreview(
     lifecycleOwner: LifecycleOwner,
-    onGalleryClick: () -> Unit,
-    onSettingsClick: () -> Unit
+    onGalleryClick: () -> Unit
 ) {
     val context = LocalContext.current
     val activity = context as? MainActivity
@@ -532,21 +500,12 @@ private fun CameraPreview(
     val flashAlpha = remember { Animatable(0f) }
     var fadeZoomJob by remember { mutableStateOf<Job?>(null) }
     var flashJob by remember { mutableStateOf<Job?>(null) }
-    val coroutineScope = rememberCoroutineScope()
-    val dataStore = remember(context) { context.cameraPreferenceDataStore }
+    val scope = rememberCoroutineScope()
+    val dataStore = remember(context) { context.gridPreferenceDataStore }
     val showGridFlow = remember(dataStore) {
         dataStore.data.map { preferences -> preferences[GRID_ENABLED_KEY] ?: false }
     }
     val showGrid by showGridFlow.collectAsState(initial = false)
-    val shutterSoundFlow = remember(dataStore) {
-        dataStore.data.map { preferences -> preferences[SHUTTER_SOUND_KEY] ?: false }
-    }
-    val shutterSoundEnabled by shutterSoundFlow.collectAsState(initial = false)
-    val mediaActionSound = remember {
-        MediaActionSound().apply {
-            load(MediaActionSound.SHUTTER_CLICK)
-        }
-    }
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
     var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
 
@@ -646,29 +605,32 @@ private fun CameraPreview(
         }
     }
 
-    DisposableEffect(activity, coroutineScope) {
+    DisposableEffect(activity, scope) {
         if (activity == null) {
             onDispose {
                 flashJob?.cancel()
                 flashJob = null
             }
         } else {
-            val animator = FlashAnimator {
-                flashJob?.cancel()
-                flashJob = coroutineScope.launch {
-                    try {
-                        flashAlpha.animateTo(1f, tween(durationMillis = 120))
-                        flashAlpha.animateTo(0f, tween(durationMillis = 180))
-                    } finally {
-                        flashJob = null
+            val listener: () -> Unit = {
+                scope.launch {
+                    flashJob?.cancel()
+                    flashJob = launch {
+                        try {
+                            flashAlpha.snapTo(0f)
+                            flashAlpha.animateTo(1f, tween(120))
+                            flashAlpha.animateTo(0f, tween(180))
+                        } finally {
+                            flashJob = null
+                        }
                     }
                 }
             }
-            activity.registerFlashAnimator(animator)
+            activity.registerFlashListener(listener)
             onDispose {
                 flashJob?.cancel()
                 flashJob = null
-                activity.unregisterFlashAnimator(animator)
+                activity.unregisterFlashListener(listener)
             }
         }
     }
@@ -721,28 +683,6 @@ private fun CameraPreview(
     val currentLinearZoom = rememberUpdatedState(linearZoom)
     val currentFinderEnabled = rememberUpdatedState(finderEnabled)
     val currentFinderResult = rememberUpdatedState(finderResult)
-
-    DisposableEffect(mediaActionSound) {
-        onDispose {
-            mediaActionSound.release()
-        }
-    }
-
-    DisposableEffect(activity, mediaActionSound) {
-        val act = activity
-        if (act != null) {
-            act.registerShutterSound(mediaActionSound)
-            onDispose {
-                act.unregisterShutterSound(mediaActionSound)
-            }
-        } else {
-            onDispose { }
-        }
-    }
-
-    LaunchedEffect(activity, shutterSoundEnabled) {
-        activity?.setShutterSoundEnabled(shutterSoundEnabled)
-    }
 
     DisposableEffect(previewView) {
         val tapGestureDetector = GestureDetector(
@@ -809,7 +749,7 @@ private fun CameraPreview(
 
                 override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
                     if (currentCamera.value != null) {
-                        coroutineScope.launch {
+                        scope.launch {
                             fadeZoomJob?.cancel()
                             fadeZoomJob = null
                             zoomOverlayAlpha.animateTo(1f, tween(durationMillis = 150))
@@ -821,7 +761,7 @@ private fun CameraPreview(
 
                 override fun onScaleEnd(detector: ScaleGestureDetector) {
                     fadeZoomJob?.cancel()
-                    fadeZoomJob = coroutineScope.launch {
+                    fadeZoomJob = scope.launch {
                         delay(1_000)
                         zoomOverlayAlpha.animateTo(0f, tween(durationMillis = 300))
                         fadeZoomJob = null
@@ -919,8 +859,6 @@ private fun CameraPreview(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             horizontalAlignment = Alignment.End
         ) {
-            SettingsButton(onClick = onSettingsClick)
-
             ZoomIndicator(
                 zoomRatio = zoomRatio,
                 alpha = overlayAlpha
@@ -940,7 +878,7 @@ private fun CameraPreview(
             GridToggleButton(
                 isEnabled = showGrid,
                 onToggle = {
-                    coroutineScope.launch {
+                    scope.launch {
                         dataStore.edit { preferences ->
                             preferences[GRID_ENABLED_KEY] = !showGrid
                         }
@@ -964,9 +902,14 @@ private fun CameraPreview(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.White)
                 .graphicsLayer(alpha = flashAlpha.value)
-        )
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.White)
+            )
+        }
     }
 }
 
@@ -1065,29 +1008,6 @@ private fun GalleryButton(
     ) {
         Text(
             text = "🖼",
-            color = Color.White,
-            fontSize = 20.sp,
-            textAlign = TextAlign.Center
-        )
-    }
-}
-
-@Composable
-private fun SettingsButton(
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit
-) {
-    Box(
-        modifier = modifier
-            .size(48.dp)
-            .clip(CircleShape)
-            .background(Color.Black.copy(alpha = 0.4f))
-            .border(width = 1.dp, color = Color.White, shape = CircleShape)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = "⚙",
             color = Color.White,
             fontSize = 20.sp,
             textAlign = TextAlign.Center
