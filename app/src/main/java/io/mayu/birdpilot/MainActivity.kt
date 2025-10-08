@@ -5,7 +5,9 @@ import android.app.Activity
 import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Matrix
 import android.hardware.display.DisplayManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -14,13 +16,13 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
+import android.util.Size
 import android.view.GestureDetector
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.Surface
 import android.widget.Toast
-import android.net.Uri
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -29,10 +31,13 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
+import androidx.camera.core.UseCase
 import androidx.camera.core.ZoomState
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -88,16 +93,22 @@ import androidx.datastore.preferences.preferencesDataStore
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private val Context.gridPreferenceDataStore by preferencesDataStore(name = "camera_preferences")
 private val GRID_ENABLED_KEY = booleanPreferencesKey("grid_enabled")
@@ -449,6 +460,9 @@ private fun CameraPreview(
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
     }
+    val previewUseCase = remember {
+        Preview.Builder().build()
+    }
     val imageCapture = remember {
         ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
@@ -466,12 +480,66 @@ private fun CameraPreview(
         dataStore.data.map { preferences -> preferences[GRID_ENABLED_KEY] ?: false }
     }
     val showGrid by showGridFlow.collectAsState(initial = false)
+    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+    var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+
+    LaunchedEffect(cameraProviderFuture) {
+        val provider = withContext(Dispatchers.IO) {
+            cameraProviderFuture.get()
+        }
+        cameraProvider = provider
+    }
+    var finderEnabled by remember { mutableStateOf(false) }
+    var finderResult by remember { mutableStateOf<FinderResult?>(null) }
+    val finderAlpha = remember { Animatable(0f) }
+    val finderExecutor = remember {
+        Executors.newSingleThreadExecutor()
+    }
+    val finderAnalyzer = remember(previewView, executor) {
+        FinderAnalyzer(
+            previewView = previewView,
+            mainExecutor = executor
+        ) { result ->
+            finderResult = result
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            finderExecutor.shutdown()
+        }
+    }
+    val imageAnalysis = remember {
+        ImageAnalysis.Builder()
+            .setTargetResolution(Size(320, 240))
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+            .build()
+    }
 
     LaunchedEffect(focusRingPosition) {
         val current = focusRingPosition ?: return@LaunchedEffect
         delay(3_000)
         if (focusRingPosition == current) {
             focusRingPosition = null
+        }
+    }
+
+    LaunchedEffect(finderEnabled) {
+        if (!finderEnabled) {
+            finderAlpha.snapTo(0f)
+        }
+    }
+
+    LaunchedEffect(finderResult?.timestamp, finderEnabled) {
+        if (!finderEnabled || finderResult == null) {
+            finderAlpha.animateTo(0f, tween(durationMillis = 180))
+        } else {
+            finderAlpha.animateTo(1f, tween(durationMillis = 120))
+            val stamp = finderResult?.timestamp
+            delay(1_000)
+            if (finderResult?.timestamp == stamp && finderEnabled) {
+                finderAlpha.animateTo(0.35f, tween(durationMillis = 250))
+            }
         }
     }
 
@@ -482,27 +550,33 @@ private fun CameraPreview(
         }
     }
 
-    DisposableEffect(lifecycleOwner) {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-        var cameraProvider: ProcessCameraProvider? = null
+    LaunchedEffect(cameraProvider, finderEnabled, previewView, imageCapture) {
+        val provider = cameraProvider ?: return@LaunchedEffect
+        previewUseCase.setSurfaceProvider(previewView.surfaceProvider)
+        val selector = CameraSelector.DEFAULT_BACK_CAMERA
+        imageCapture.targetRotation = previewView.display?.rotation ?: Surface.ROTATION_0
+        imageAnalysis.targetRotation = previewView.display?.rotation ?: Surface.ROTATION_0
 
-        val listener = Runnable {
-            cameraProvider = cameraProviderFuture.get()
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(previewView.surfaceProvider)
-            }
-            val selector = CameraSelector.DEFAULT_BACK_CAMERA
-
-            imageCapture.targetRotation = previewView.display?.rotation ?: Surface.ROTATION_0
-
-            cameraProvider?.unbindAll()
-            val boundCamera = cameraProvider?.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
-            camera = boundCamera
+        val useCases = mutableListOf<UseCase>(previewUseCase, imageCapture)
+        if (finderEnabled) {
+            finderAnalyzer.reset()
+            imageAnalysis.setAnalyzer(finderExecutor, finderAnalyzer)
+            useCases.add(imageAnalysis)
+        } else {
+            imageAnalysis.clearAnalyzer()
+            finderAnalyzer.reset()
+            finderResult = null
         }
 
-        cameraProviderFuture.addListener(listener, executor)
+        provider.unbindAll()
+        val boundCamera = provider.bindToLifecycle(lifecycleOwner, selector, *useCases.toTypedArray())
+        camera = boundCamera
+    }
 
+    DisposableEffect(cameraProvider) {
         onDispose {
+            imageAnalysis.clearAnalyzer()
+            finderAnalyzer.reset()
             cameraProvider?.unbindAll()
             camera = null
         }
@@ -522,6 +596,8 @@ private fun CameraPreview(
 
     val currentCamera = rememberUpdatedState(camera)
     val currentLinearZoom = rememberUpdatedState(linearZoom)
+    val currentFinderEnabled = rememberUpdatedState(finderEnabled)
+    val currentFinderResult = rememberUpdatedState(finderResult)
 
     DisposableEffect(previewView) {
         val tapGestureDetector = GestureDetector(
@@ -532,10 +608,25 @@ private fun CameraPreview(
                     if (previewView.width == 0 || previewView.height == 0) {
                         return false
                     }
-                    val factory = SurfaceOrientedMeteringPointFactory(
-                        previewView.width.toFloat(),
-                        previewView.height.toFloat()
-                    )
+                    val factory = previewView.meteringPointFactory
+                    val finder = currentFinderResult.value
+                    if (currentFinderEnabled.value && finder != null) {
+                        val radiusPx = min(previewView.width, previewView.height) * 0.05f
+                        val dx = e.x - finder.viewOffset.x
+                        val dy = e.y - finder.viewOffset.y
+                        if (hypot(dx.toDouble(), dy.toDouble()) <= radiusPx) {
+                            val focusPoint = factory.createPoint(finder.viewOffset.x, finder.viewOffset.y)
+                            val action = FocusMeteringAction.Builder(
+                                focusPoint,
+                                FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+                            )
+                                .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                                .build()
+                            cam.cameraControl.startFocusAndMetering(action)
+                            focusRingPosition = finder.viewOffset
+                            return true
+                        }
+                    }
                     val point = factory.createPoint(e.x, e.y)
                     val action = FocusMeteringAction.Builder(
                         point,
@@ -645,6 +736,19 @@ private fun CameraPreview(
             }
         }
 
+        val markerAlpha = finderAlpha.value
+        val activeFinder = finderResult
+        if (finderEnabled && activeFinder != null && markerAlpha > 0.01f) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val radius = min(size.width, size.height) * 0.05f
+                drawCircle(
+                    color = Color.Yellow.copy(alpha = markerAlpha),
+                    radius = radius,
+                    center = activeFinder.viewOffset
+                )
+            }
+        }
+
         focusRingPosition?.let { position ->
             val focusSize = 72.dp
             val offset = with(density) {
@@ -673,6 +777,17 @@ private fun CameraPreview(
             ZoomIndicator(
                 zoomRatio = zoomRatio,
                 alpha = overlayAlpha
+            )
+
+            FinderToggleButton(
+                isEnabled = finderEnabled,
+                onToggle = {
+                    finderEnabled = !finderEnabled
+                    if (!finderEnabled) {
+                        finderAnalyzer.reset()
+                        finderResult = null
+                    }
+                }
             )
 
             GridToggleButton(
@@ -719,6 +834,39 @@ private fun GridToggleButton(
             text = if (isEnabled) "▦" else "▢",
             color = Color.White,
             fontSize = 20.sp,
+            textAlign = TextAlign.Center
+        )
+    }
+}
+
+@Composable
+private fun FinderToggleButton(
+    isEnabled: Boolean,
+    onToggle: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .background(
+                if (isEnabled) {
+                    Color.Yellow.copy(alpha = 0.5f)
+                } else {
+                    Color.Black.copy(alpha = 0.4f)
+                }
+            )
+            .border(
+                width = 1.dp,
+                color = if (isEnabled) Color.Yellow else Color.White,
+                shape = CircleShape
+            )
+            .clickable(onClick = onToggle),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = "Finder",
+            color = if (isEnabled) Color.Black else Color.White,
+            fontSize = 12.sp,
             textAlign = TextAlign.Center
         )
     }
@@ -796,4 +944,298 @@ private fun ShutterButton(
             )
         }
     }
+}
+
+private data class FinderResult(
+    val viewOffset: Offset,
+    val normalizedX: Float,
+    val normalizedY: Float,
+    val timestamp: Long
+)
+
+private class FinderAnalyzer(
+    private val previewView: PreviewView,
+    private val mainExecutor: Executor,
+    private val onResult: (FinderResult?) -> Unit
+) : ImageAnalysis.Analyzer {
+    private var previousFrame: ByteArray? = null
+    private var emaX: Float? = null
+    private var emaY: Float? = null
+    private var lastAnalysisTime: Long = 0L
+    private var lastDispatchTime: Long = 0L
+    @Volatile
+    private var hasLastResult: Boolean = false
+
+    fun reset() {
+        previousFrame = null
+        emaX = null
+        emaY = null
+        lastAnalysisTime = 0L
+        if (hasLastResult) {
+            hasLastResult = false
+            mainExecutor.execute { onResult(null) }
+        }
+    }
+
+    override fun analyze(image: ImageProxy) {
+        try {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastAnalysisTime < 100L) {
+                return
+            }
+            lastAnalysisTime = now
+
+            val width = image.width
+            val height = image.height
+            val yData = extractYPlane(image) ?: return
+            val previous = previousFrame
+            previousFrame = yData.copyOf()
+            if (previous == null || previous.size != yData.size) {
+                return
+            }
+
+            val diffValues = IntArray(yData.size)
+            val histogram = IntArray(256)
+            var sum = 0L
+            var sumSq = 0L
+            for (i in yData.indices) {
+                val current = yData[i].toInt() and 0xFF
+                val prev = previous[i].toInt() and 0xFF
+                val delta = abs(current - prev)
+                diffValues[i] = delta
+                histogram[delta]++
+                sum += delta
+                sumSq += delta.toLong() * delta
+            }
+
+            val totalPixels = diffValues.size
+            if (totalPixels == 0) {
+                reset()
+                return
+            }
+
+            val mean = sum.toDouble() / totalPixels
+            val variance = sumSq.toDouble() / totalPixels - mean * mean
+            val threshold = if (variance < 20.0) {
+                16
+            } else {
+                computeOtsuThreshold(histogram, totalPixels)
+            }
+
+            val mask = BooleanArray(totalPixels)
+            for (i in diffValues.indices) {
+                if (diffValues[i] >= threshold) {
+                    mask[i] = true
+                }
+            }
+
+            val blob = findLargestBlob(mask, width, height)
+            if (blob == null) {
+                emaX = null
+                emaY = null
+                dispatchNull()
+                return
+            }
+
+            val centroidX = blob.sumX.toFloat() / blob.area
+            val centroidY = blob.sumY.toFloat() / blob.area
+            val meteringFactory = SurfaceOrientedMeteringPointFactory(width.toFloat(), height.toFloat())
+            val meteringPoint = meteringFactory.createPoint(centroidX, centroidY)
+            var normalizedX = meteringPoint.x.coerceIn(0f, 1f)
+            var normalizedY = meteringPoint.y.coerceIn(0f, 1f)
+
+            val currentX = emaX
+            val currentY = emaY
+            val smoothedX = if (currentX == null) normalizedX else currentX + (normalizedX - currentX) * 0.2f
+            val smoothedY = if (currentY == null) normalizedY else currentY + (normalizedY - currentY) * 0.2f
+            normalizedX = smoothedX.coerceIn(0f, 1f)
+            normalizedY = smoothedY.coerceIn(0f, 1f)
+            emaX = normalizedX
+            emaY = normalizedY
+
+            dispatchResult(normalizedX, normalizedY, now)
+        } finally {
+            image.close()
+        }
+    }
+
+    private fun dispatchNull() {
+        if (!hasLastResult) {
+            return
+        }
+        hasLastResult = false
+        mainExecutor.execute { onResult(null) }
+    }
+
+    private fun dispatchResult(normalizedX: Float, normalizedY: Float, timestamp: Long) {
+        if (timestamp - lastDispatchTime < 16L && hasLastResult) {
+            return
+        }
+        lastDispatchTime = timestamp
+        mainExecutor.execute {
+            val viewOffset = projectToPreview(normalizedX, normalizedY)
+            if (viewOffset != null) {
+                hasLastResult = true
+                val meteringPoint = previewView.meteringPointFactory.createPoint(viewOffset.x, viewOffset.y)
+                onResult(
+                    FinderResult(
+                        viewOffset = viewOffset,
+                        normalizedX = meteringPoint.x.coerceIn(0f, 1f),
+                        normalizedY = meteringPoint.y.coerceIn(0f, 1f),
+                        timestamp = timestamp
+                    )
+                )
+            } else {
+                hasLastResult = false
+                onResult(null)
+            }
+        }
+    }
+
+    private fun projectToPreview(normalizedX: Float, normalizedY: Float): Offset? {
+        val transform = previewView.outputTransform
+        val width = previewView.width
+        val height = previewView.height
+        if (transform != null) {
+            val matrix = Matrix(transform.matrix)
+            val points = floatArrayOf(normalizedX * 2f - 1f, normalizedY * 2f - 1f)
+            matrix.mapPoints(points)
+            return Offset(points[0], points[1])
+        }
+        if (width == 0 || height == 0) {
+            return null
+        }
+        return Offset(normalizedX * width.toFloat(), normalizedY * height.toFloat())
+    }
+
+    private fun extractYPlane(image: ImageProxy): ByteArray? {
+        if (image.planes.isEmpty()) {
+            return null
+        }
+        val plane = image.planes[0]
+        val buffer = plane.buffer.duplicate()
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
+        val width = image.width
+        val height = image.height
+        val data = ByteArray(width * height)
+        buffer.rewind()
+        if (pixelStride == 1) {
+            for (row in 0 until height) {
+                val rowStart = row * rowStride
+                if (rowStart + width > buffer.capacity()) {
+                    break
+                }
+                buffer.position(rowStart)
+                buffer.get(data, row * width, width)
+            }
+            return data
+        }
+        val rowBuffer = ByteArray(rowStride)
+        for (row in 0 until height) {
+            val rowStart = row * rowStride
+            val available = buffer.capacity() - rowStart
+            if (available <= 0) {
+                break
+            }
+            buffer.position(rowStart)
+            buffer.get(rowBuffer, 0, min(rowStride, available))
+            val dstOffset = row * width
+            var srcIndex = 0
+            var column = 0
+            while (column < width && srcIndex < rowStride) {
+                data[dstOffset + column] = rowBuffer[srcIndex]
+                srcIndex += pixelStride
+                column++
+            }
+        }
+        return data
+    }
+
+    private fun findLargestBlob(mask: BooleanArray, width: Int, height: Int): Blob? {
+        val minArea = max(1, (mask.size * 0.006f).toInt())
+        val visited = ByteArray(mask.size)
+        val queue = IntArray(mask.size)
+        var head: Int
+        var tail: Int
+        var bestArea = 0
+        var bestSumX = 0L
+        var bestSumY = 0L
+        val neighborsX = intArrayOf(-1, 0, 1, -1, 1, -1, 0, 1)
+        val neighborsY = intArrayOf(-1, -1, -1, 0, 0, 1, 1, 1)
+        for (index in mask.indices) {
+            if (!mask[index] || visited[index].toInt() != 0) {
+                continue
+            }
+            head = 0
+            tail = 0
+            queue[tail++] = index
+            visited[index] = 1
+            var area = 0
+            var sumX = 0L
+            var sumY = 0L
+            while (head < tail) {
+                val current = queue[head++]
+                val y = current / width
+                val x = current % width
+                area++
+                sumX += x
+                sumY += y
+                for (i in neighborsX.indices) {
+                    val nx = x + neighborsX[i]
+                    val ny = y + neighborsY[i]
+                    if (nx < 0 || ny < 0 || nx >= width || ny >= height) {
+                        continue
+                    }
+                    val neighborIndex = ny * width + nx
+                    if (!mask[neighborIndex] || visited[neighborIndex].toInt() != 0) {
+                        continue
+                    }
+                    visited[neighborIndex] = 1
+                    queue[tail++] = neighborIndex
+                }
+            }
+            if (area >= minArea && area > bestArea) {
+                bestArea = area
+                bestSumX = sumX
+                bestSumY = sumY
+            }
+        }
+        if (bestArea == 0) {
+            return null
+        }
+        return Blob(bestArea, bestSumX, bestSumY)
+    }
+
+    private fun computeOtsuThreshold(histogram: IntArray, total: Int): Int {
+        var sum = 0L
+        for (i in histogram.indices) {
+            sum += i.toLong() * histogram[i]
+        }
+        var sumB = 0L
+        var wB = 0L
+        var maxVar = 0.0
+        var threshold = 16
+        for (i in histogram.indices) {
+            wB += histogram[i].toLong()
+            if (wB == 0L) continue
+            val wF = total - wB
+            if (wF == 0L) break
+            sumB += i.toLong() * histogram[i]
+            val mB = sumB.toDouble() / wB
+            val mF = (sum - sumB).toDouble() / wF
+            val between = wB * wF * (mB - mF) * (mB - mF)
+            if (between > maxVar) {
+                maxVar = between
+                threshold = i
+            }
+        }
+        return threshold
+    }
+
+    private data class Blob(
+        val area: Int,
+        val sumX: Long,
+        val sumY: Long
+    )
 }
