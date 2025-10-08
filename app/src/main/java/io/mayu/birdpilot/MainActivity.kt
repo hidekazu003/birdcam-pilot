@@ -100,7 +100,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.hypot
-import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
@@ -958,6 +957,11 @@ private class FinderAnalyzer(
     private val mainExecutor: Executor,
     private val onResult: (FinderResult?) -> Unit
 ) : ImageAnalysis.Analyzer {
+    private val ACTIVE_RATIO_MAX = 0.08f
+    private val MIN_AREA_FRAC = 0.008f
+    private val MAX_AREA_FRAC = 0.15f
+    private val STABILITY_RADIUS_F = 0.05f
+    private val STABILITY_REQUIRED = 2
     private var previousFrame: ByteArray? = null
     private var emaX: Float? = null
     private var emaY: Float? = null
@@ -965,12 +969,18 @@ private class FinderAnalyzer(
     private var lastDispatchTime: Long = 0L
     @Volatile
     private var hasLastResult: Boolean = false
+    private var lastAcceptedX: Float? = null
+    private var lastAcceptedY: Float? = null
+    private var stableCount: Int = 0
 
     fun reset() {
         previousFrame = null
         emaX = null
         emaY = null
         lastAnalysisTime = 0L
+        lastAcceptedX = null
+        lastAcceptedY = null
+        stableCount = 0
         if (hasLastResult) {
             hasLastResult = false
             mainExecutor.execute { onResult(null) }
@@ -1023,16 +1033,32 @@ private class FinderAnalyzer(
             }
 
             val mask = BooleanArray(totalPixels)
+            var onCount = 0
             for (i in diffValues.indices) {
                 if (diffValues[i] >= threshold) {
                     mask[i] = true
+                    onCount++
                 }
+            }
+
+            val activeRatio = onCount.toFloat() / totalPixels
+            if (activeRatio > ACTIVE_RATIO_MAX) {
+                emaX = null
+                emaY = null
+                lastAcceptedX = null
+                lastAcceptedY = null
+                stableCount = 0
+                dispatchNull()
+                return
             }
 
             val blob = findLargestBlob(mask, width, height)
             if (blob == null) {
                 emaX = null
                 emaY = null
+                lastAcceptedX = null
+                lastAcceptedY = null
+                stableCount = 0
                 dispatchNull()
                 return
             }
@@ -1052,6 +1078,32 @@ private class FinderAnalyzer(
             normalizedY = smoothedY.coerceIn(0f, 1f)
             emaX = normalizedX
             emaY = normalizedY
+
+            val previousAcceptedX = lastAcceptedX
+            val previousAcceptedY = lastAcceptedY
+            val shortSide = min(width, height).toFloat().coerceAtLeast(1f)
+            stableCount = if (previousAcceptedX == null || previousAcceptedY == null) {
+                1
+            } else {
+                val dx = (normalizedX - previousAcceptedX) * width.toFloat()
+                val dy = (normalizedY - previousAcceptedY) * height.toFloat()
+                val distance = hypot(dx.toDouble(), dy.toDouble()).toFloat() / shortSide
+                if (distance <= STABILITY_RADIUS_F) {
+                    stableCount + 1
+                } else {
+                    1
+                }
+            }
+            if (stableCount > STABILITY_REQUIRED) {
+                stableCount = STABILITY_REQUIRED
+            }
+            lastAcceptedX = normalizedX
+            lastAcceptedY = normalizedY
+
+            if (stableCount < STABILITY_REQUIRED) {
+                dispatchNull()
+                return
+            }
 
             dispatchResult(normalizedX, normalizedY, now)
         } finally {
@@ -1153,7 +1205,6 @@ private class FinderAnalyzer(
     }
 
     private fun findLargestBlob(mask: BooleanArray, width: Int, height: Int): Blob? {
-        val minArea = max(1, (mask.size * 0.006f).toInt())
         val visited = ByteArray(mask.size)
         val queue = IntArray(mask.size)
         var head: Int
@@ -1161,6 +1212,7 @@ private class FinderAnalyzer(
         var bestArea = 0
         var bestSumX = 0L
         var bestSumY = 0L
+        val totalPixels = width * height
         val neighborsX = intArrayOf(-1, 0, 1, -1, 1, -1, 0, 1)
         val neighborsY = intArrayOf(-1, -1, -1, 0, 0, 1, 1, 1)
         for (index in mask.indices) {
@@ -1195,7 +1247,8 @@ private class FinderAnalyzer(
                     queue[tail++] = neighborIndex
                 }
             }
-            if (area >= minArea && area > bestArea) {
+            val areaFrac = if (totalPixels == 0) 0f else area.toFloat() / totalPixels.toFloat()
+            if (areaFrac >= MIN_AREA_FRAC && areaFrac <= MAX_AREA_FRAC && area > bestArea) {
                 bestArea = area
                 bestSumX = sumX
                 bestSumY = sumY
