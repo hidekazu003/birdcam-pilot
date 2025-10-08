@@ -118,6 +118,10 @@ import kotlinx.coroutines.withContext
 private val Context.gridPreferenceDataStore by preferencesDataStore(name = "camera_preferences")
 private val GRID_ENABLED_KEY = booleanPreferencesKey("grid_enabled")
 
+private fun interface FlashAnimator {
+    fun triggerFlash()
+}
+
 class MainActivity : ComponentActivity() {
     private var previewView: PreviewView? = null
     private var imageCapture: ImageCapture? = null
@@ -127,6 +131,7 @@ class MainActivity : ComponentActivity() {
     private var lastShotAt: Long = 0L
     private var isCameraScreenVisible: Boolean = false
     private lateinit var displayManager: DisplayManager
+    private var flashAnimator: FlashAnimator? = null
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = Unit
 
@@ -194,6 +199,16 @@ class MainActivity : ComponentActivity() {
         isCameraScreenVisible = visible
     }
 
+    fun registerFlashAnimator(animator: FlashAnimator) {
+        flashAnimator = animator
+    }
+
+    fun unregisterFlashAnimator(animator: FlashAnimator) {
+        if (flashAnimator === animator) {
+            flashAnimator = null
+        }
+    }
+
     fun requestCapture() {
         triggerCapture()
     }
@@ -235,6 +250,7 @@ class MainActivity : ComponentActivity() {
                     mainExecutor,
                     object : ImageCapture.OnImageSavedCallback {
                         override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                            flashAnimator?.triggerFlash()
                             Toast.makeText(this@MainActivity, "Saved", Toast.LENGTH_SHORT).show()
                             isCapturing.set(false)
                         }
@@ -485,7 +501,9 @@ private fun CameraPreview(
     var linearZoom by remember { mutableStateOf(0f) }
     var zoomRatio by remember { mutableStateOf(1f) }
     val zoomOverlayAlpha = remember { Animatable(0f) }
+    val flashAlpha = remember { Animatable(0f) }
     var fadeZoomJob by remember { mutableStateOf<Job?>(null) }
+    var flashJob by remember { mutableStateOf<Job?>(null) }
     val coroutineScope = rememberCoroutineScope()
     val dataStore = remember(context) { context.gridPreferenceDataStore }
     val showGridFlow = remember(dataStore) {
@@ -588,6 +606,33 @@ private fun CameraPreview(
         activity?.registerCameraComponents(previewView, imageCapture)
         onDispose {
             activity?.unregisterCameraComponents(previewView)
+        }
+    }
+
+    DisposableEffect(activity, coroutineScope) {
+        if (activity == null) {
+            onDispose {
+                flashJob?.cancel()
+                flashJob = null
+            }
+        } else {
+            val animator = FlashAnimator {
+                flashJob?.cancel()
+                flashJob = coroutineScope.launch {
+                    try {
+                        flashAlpha.animateTo(1f, tween(durationMillis = 120))
+                        flashAlpha.animateTo(0f, tween(durationMillis = 180))
+                    } finally {
+                        flashJob = null
+                    }
+                }
+            }
+            activity.registerFlashAnimator(animator)
+            onDispose {
+                flashJob?.cancel()
+                flashJob = null
+                activity.unregisterFlashAnimator(animator)
+            }
         }
     }
 
@@ -854,6 +899,13 @@ private fun CameraPreview(
         ) {
             activity?.requestCapture()
         }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.White)
+                .graphicsLayer(alpha = flashAlpha.value)
+        )
     }
 }
 
