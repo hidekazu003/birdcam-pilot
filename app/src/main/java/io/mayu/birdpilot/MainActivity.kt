@@ -11,6 +11,7 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.hardware.display.DisplayManager
+import android.media.MediaActionSound
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -115,8 +116,9 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private val Context.gridPreferenceDataStore by preferencesDataStore(name = "camera_preferences")
-private val GRID_ENABLED_KEY = booleanPreferencesKey("grid_enabled")
+val Context.cameraPreferenceDataStore by preferencesDataStore(name = "camera_preferences")
+val GRID_ENABLED_KEY = booleanPreferencesKey("grid_enabled")
+val SHUTTER_SOUND_KEY = booleanPreferencesKey("shutter_sound")
 
 class MainActivity : ComponentActivity() {
     private var previewView: PreviewView? = null
@@ -205,6 +207,20 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    fun registerShutterSound(sound: MediaActionSound) {
+        shutterSound = sound
+    }
+
+    fun unregisterShutterSound(sound: MediaActionSound) {
+        if (shutterSound === sound) {
+            shutterSound = null
+        }
+    }
+
+    fun setShutterSoundEnabled(enabled: Boolean) {
+        shutterSoundEnabled = enabled
+    }
+
     fun requestCapture() {
         triggerCapture()
     }
@@ -286,7 +302,8 @@ class MainActivity : ComponentActivity() {
 
 private enum class Screen {
     Camera,
-    Gallery
+    Gallery,
+    Settings
 }
 
 @Composable
@@ -420,7 +437,8 @@ fun BirdPilotApp() {
 
                     currentScreen == Screen.Camera -> CameraPreview(
                         lifecycleOwner = lifecycleOwner,
-                        onGalleryClick = onGalleryClick
+                        onGalleryClick = onGalleryClick,
+                        onSettingsClick = { currentScreen = Screen.Settings }
                     )
 
                     currentScreen == Screen.Gallery -> GalleryScreen(
@@ -428,6 +446,10 @@ fun BirdPilotApp() {
                         onOpen = { selectedPhoto = it },
                         onDelete = { deleteWithConsent(it) },
                         reloadSignal = galleryReloadSignal
+                    )
+
+                    currentScreen == Screen.Settings -> SettingsScreen(
+                        onBack = { currentScreen = Screen.Camera }
                     )
                 }
             } else {
@@ -466,7 +488,8 @@ private fun PermissionRequestView(onRequestPermission: () -> Unit) {
 @Composable
 private fun CameraPreview(
     lifecycleOwner: LifecycleOwner,
-    onGalleryClick: () -> Unit
+    onGalleryClick: () -> Unit,
+    onSettingsClick: () -> Unit
 ) {
     val context = LocalContext.current
     val activity = context as? MainActivity
@@ -506,6 +529,15 @@ private fun CameraPreview(
         dataStore.data.map { preferences -> preferences[GRID_ENABLED_KEY] ?: false }
     }
     val showGrid by showGridFlow.collectAsState(initial = false)
+    val shutterSoundFlow = remember(dataStore) {
+        dataStore.data.map { preferences -> preferences[SHUTTER_SOUND_KEY] ?: false }
+    }
+    val shutterSoundEnabled by shutterSoundFlow.collectAsState(initial = false)
+    val mediaActionSound = remember {
+        MediaActionSound().apply {
+            load(MediaActionSound.SHUTTER_CLICK)
+        }
+    }
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
     var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
 
@@ -684,6 +716,28 @@ private fun CameraPreview(
     val currentFinderEnabled = rememberUpdatedState(finderEnabled)
     val currentFinderResult = rememberUpdatedState(finderResult)
 
+    DisposableEffect(mediaActionSound) {
+        onDispose {
+            mediaActionSound.release()
+        }
+    }
+
+    DisposableEffect(activity, mediaActionSound) {
+        val act = activity
+        if (act != null) {
+            act.registerShutterSound(mediaActionSound)
+            onDispose {
+                act.unregisterShutterSound(mediaActionSound)
+            }
+        } else {
+            onDispose { }
+        }
+    }
+
+    LaunchedEffect(activity, shutterSoundEnabled) {
+        activity?.setShutterSoundEnabled(shutterSoundEnabled)
+    }
+
     DisposableEffect(previewView) {
         val tapGestureDetector = GestureDetector(
             context,
@@ -859,6 +913,8 @@ private fun CameraPreview(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             horizontalAlignment = Alignment.End
         ) {
+            SettingsButton(onClick = onSettingsClick)
+
             ZoomIndicator(
                 zoomRatio = zoomRatio,
                 alpha = overlayAlpha
@@ -1008,6 +1064,29 @@ private fun GalleryButton(
     ) {
         Text(
             text = "🖼",
+            color = Color.White,
+            fontSize = 20.sp,
+            textAlign = TextAlign.Center
+        )
+    }
+}
+
+@Composable
+private fun SettingsButton(
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.4f))
+            .border(width = 1.dp, color = Color.White, shape = CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = "⚙",
             color = Color.White,
             fontSize = 20.sp,
             textAlign = TextAlign.Center
