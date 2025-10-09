@@ -92,9 +92,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Observer
-import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.preferencesDataStore
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -105,20 +103,16 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.hypot
-import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import kotlin.ranges.ClosedFloatingPointRange
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-val Context.cameraPreferenceDataStore by preferencesDataStore(name = "camera_preferences")
-val GRID_ENABLED_KEY = booleanPreferencesKey("grid_enabled")
-val SHUTTER_SOUND_KEY = booleanPreferencesKey("shutter_sound")
 
 class MainActivity : ComponentActivity() {
     private var previewView: PreviewView? = null
@@ -524,7 +518,7 @@ private fun CameraPreview(
     var fadeZoomJob by remember { mutableStateOf<Job?>(null) }
     var flashJob by remember { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
-    val dataStore = remember(context) { context.gridPreferenceDataStore }
+    val dataStore = remember(context) { context.cameraPreferenceDataStore }
     val showGridFlow = remember(dataStore) {
         dataStore.data.map { preferences -> preferences[GRID_ENABLED_KEY] ?: false }
     }
@@ -533,6 +527,12 @@ private fun CameraPreview(
         dataStore.data.map { preferences -> preferences[SHUTTER_SOUND_KEY] ?: false }
     }
     val shutterSoundEnabled by shutterSoundFlow.collectAsState(initial = false)
+    val finderProfileFlow = remember(dataStore) {
+        dataStore.data.map { preferences ->
+            FinderProfile.fromPreference(preferences[FINDER_PROFILE_KEY])
+        }
+    }
+    val finderProfile by finderProfileFlow.collectAsState(initial = FinderProfile.OUTDOOR)
     val mediaActionSound = remember {
         MediaActionSound().apply {
             load(MediaActionSound.SHUTTER_CLICK)
@@ -559,6 +559,12 @@ private fun CameraPreview(
             mainExecutor = executor
         ) { result ->
             finderResult = result
+        }
+    }
+    LaunchedEffect(finderAnalyzer, finderProfile) {
+        val changed = finderAnalyzer.setProfile(finderProfile)
+        if (changed) {
+            finderAnalyzer.reset()
         }
     }
     DisposableEffect(sensorManager, gyroSensor, finderEnabled) {
@@ -1134,9 +1140,11 @@ private class FinderAnalyzer(
     private val mainExecutor: Executor,
     private val onResult: (FinderResult?) -> Unit
 ) : ImageAnalysis.Analyzer {
-    private val MIN_AREA_FRAC = 0.008f
-    private val MAX_AREA_FRAC = 0.15f
     private val STABILITY_RADIUS_F = 0.05f
+    @Volatile
+    private var profileThresholds: FinderThresholds = FinderProfile.OUTDOOR.thresholds()
+    @Volatile
+    private var currentProfile: FinderProfile = FinderProfile.OUTDOOR
     private var previousFrame: ByteArray? = null
     private var emaX: Float? = null
     private var emaY: Float? = null
@@ -1149,6 +1157,15 @@ private class FinderAnalyzer(
     private var stableCount: Int = 0
     @Volatile
     private var gyroOmega: Float = 0f
+
+    fun setProfile(profile: FinderProfile): Boolean {
+        if (currentProfile == profile) {
+            return false
+        }
+        currentProfile = profile
+        profileThresholds = profile.thresholds()
+        return true
+    }
 
     fun reset() {
         previousFrame = null
@@ -1178,14 +1195,14 @@ private class FinderAnalyzer(
             lastAnalysisTime = now
 
             val omega = gyroOmega
+            val thresholds = profileThresholds
             if (omega >= 1.2f) {
                 dispatchNull()
                 lastAnalysisTime = now + 100L
                 return
             }
-            val omegaClamped = min(1.2f, max(0f, omega))
-            val activeRatioMax = 0.10f + 0.15f * (omegaClamped / 1.2f)
-            val stabilityRequired = if (omega >= 0.5f) 2 else 1
+            val activeRatioMax = thresholds.activeRatioMax
+            val stabilityRequired = thresholds.stabilityRequired
 
             val width = image.width
             val height = image.height
@@ -1244,7 +1261,7 @@ private class FinderAnalyzer(
                 return
             }
 
-            val blob = findLargestBlob(mask, width, height)
+            val blob = findLargestBlob(mask, width, height, thresholds.minAreaRange)
             if (blob == null) {
                 emaX = null
                 emaY = null
@@ -1396,7 +1413,12 @@ private class FinderAnalyzer(
         return data
     }
 
-    private fun findLargestBlob(mask: BooleanArray, width: Int, height: Int): Blob? {
+    private fun findLargestBlob(
+        mask: BooleanArray,
+        width: Int,
+        height: Int,
+        areaRange: ClosedFloatingPointRange<Float>
+    ): Blob? {
         val visited = ByteArray(mask.size)
         val queue = IntArray(mask.size)
         var head: Int
@@ -1440,7 +1462,11 @@ private class FinderAnalyzer(
                 }
             }
             val areaFrac = if (totalPixels == 0) 0f else area.toFloat() / totalPixels.toFloat()
-            if (areaFrac >= MIN_AREA_FRAC && areaFrac <= MAX_AREA_FRAC && area > bestArea) {
+            if (
+                areaFrac >= areaRange.start &&
+                areaFrac <= areaRange.endInclusive &&
+                area > bestArea
+            ) {
                 bestArea = area
                 bestSumX = sumX
                 bestSumY = sumY
