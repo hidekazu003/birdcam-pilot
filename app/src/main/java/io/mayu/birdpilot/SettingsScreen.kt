@@ -10,12 +10,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -44,6 +48,12 @@ fun SettingsScreen(
         dataStore.data.map { preferences -> preferences[SHUTTER_SOUND_KEY] ?: false }
     }
     val shutterSoundEnabled by shutterSoundFlow.collectAsState(initial = false)
+    val finderProfileFlow = remember(dataStore) {
+        dataStore.data.map { preferences ->
+            FinderProfile.fromPreference(preferences[FINDER_PROFILE_KEY])
+        }
+    }
+    val finderProfile by finderProfileFlow.collectAsState(initial = FinderProfile.OUTDOOR)
 
     Surface(color = Color.Black, modifier = Modifier.fillMaxSize()) {
         Column(
@@ -104,6 +114,58 @@ fun SettingsScreen(
                         }
                     }
                 )
+            }
+
+            Spacer(modifier = Modifier.height(32.dp))
+
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "Finder プロファイル",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    text = "撮影環境に合わせて検出感度を切り替えます",
+                    color = Color.White.copy(alpha = 0.7f),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    FinderProfile.values().forEach { profile ->
+                        FilterChip(
+                            selected = finderProfile == profile,
+                            onClick = {
+                                if (finderProfile != profile) {
+                                    coroutineScope.launch {
+                                        dataStore.edit { preferences ->
+                                            preferences[FINDER_PROFILE_KEY] = profile.preferenceValue
+                                        }
+                                    }
+                                }
+                            },
+                            label = {
+                                Text(text = profile.label)
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                containerColor = Color.Black,
+                                selectedContainerColor = Color.White,
+                                labelColor = Color.White,
+                                selectedLabelColor = Color.Black
+                            ),
+                            border = FilterChipDefaults.filterChipBorder(
+                                enabled = true,
+                                selected = finderProfile == profile,
+                                borderColor = Color.White,
+                                selectedBorderColor = Color.White
+                            )
+                        )
+                    }
+                }
             }
         }
     }
