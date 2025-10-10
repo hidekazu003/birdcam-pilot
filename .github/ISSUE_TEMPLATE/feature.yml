@@ -1,0 +1,37 @@
+name: Feature / Task
+description: Feature or technical task seeded from Backlog
+labels: ["type:feat"]
+body:
+  - type: input
+    id: id
+    attributes:
+      label: Task ID
+      description: e.g., T-C1 / T-D1
+      placeholder: "T-XXX"
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: Problem / goal
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: In / Out of scope
+  - type: checkboxes
+    id: dod
+    attributes:
+      label: DoD (Acceptance Criteria)
+      options:
+        - label: Spec refs added（e.g., C1–C4 / D1）
+        - label: Branch named (feat/...)
+        - label: PR uses Squash & merge
+        - label: Shutter Sound policy遵守（flashListenerのみ／ラッパ未使用）
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / Links
