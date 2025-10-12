@@ -74,6 +74,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -498,14 +499,69 @@ private fun CameraPreview(
     val gyroSensor = remember(sensorManager) {
         sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
     }
-    var gyroOmega by remember { mutableStateOf(0f) }
-    val previewView = remember {
-        PreviewView(context).apply {
-            scaleType = PreviewView.ScaleType.FILL_CENTER
+    val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
+
+    var roi     by remember { mutableStateOf<Rect?>(null) }
+    var roiLow  by remember { mutableStateOf(true) }
+
+    var gyroOmega by remember { mutableStateOf(0f) }      // ← これを1つだけ残す（L529の方を採用）
+    var autoArmed by remember { mutableStateOf(false) }
+    var lastTapAt by remember { mutableLongStateOf(0L) }
+
+
+    val showRoiFn: (Rect, Boolean) -> Unit = { r, l -> roi = r; roiLow = l }
+
+    // --- Stability auto-fire params ---
+    val stableOmega = 0.18f      // 角速度しきい値（弱すぎ/強すぎなら後で微調整）
+    val holdMs = 400L            // 安定が続く時間
+    val cooldownMs = 1200L       // 連続起動のクールダウン
+    val armDelayMs = 350L   // タップ直後は最低 300ms 待ってから自動発火
+
+    var becameStableAt by remember { mutableLongStateOf(0L) }
+    var lastAutoFireAt by remember { mutableLongStateOf(0L) }
+
+// 最終タップ位置（未タップ時は中央）
+    var lastTap by remember { mutableStateOf(PointF(0.5f, 0.5f)) }
+
+// gyroの値を定期ポーリングして安定を検知（snapshotFlowを使わない版）
+    LaunchedEffect(Unit) {
+        while (true) {
+            val now = SystemClock.uptimeMillis()
+            val omega = gyroOmega
+
+            val armedAndWaited = autoArmed && (now - lastTapAt) >= armDelayMs
+            val stable         = kotlin.math.abs(omega) < stableOmega
+
+            if (!armedAndWaited || !stable) {
+                // まだ武装直後の待ち中 or 動いている → 安定時間はリセット
+                becameStableAt = 0L
+            } else {
+                // ここから“安定”カウント開始
+                if (becameStableAt == 0L) becameStableAt = now
+                val stableFor = now - becameStableAt
+
+                if (stableFor >= holdMs &&
+                    now - lastAutoFireAt >= cooldownMs &&
+                    previewView.width > 0 && previewView.height > 0
+                ) {
+                    lastAutoFireAt = now
+                    autoArmed = false                     // 1回だけ
+                    StillScan.ensureBirdness(lastTap, previewView, showRoiFn)
+                }
+            }
+            kotlinx.coroutines.delay(50)  // 20Hzポーリング
+
+
+
+
+            kotlinx.coroutines.delay(50) // 20Hz で監視
         }
     }
-    var roi by remember { mutableStateOf<Rect?>(null) }
-    var roiLow by remember { mutableStateOf(true) }
+
+
+
+
+
     LaunchedEffect(roi) {
         if (roi != null) {
             kotlinx.coroutines.delay(1200)
@@ -513,7 +569,6 @@ private fun CameraPreview(
         }
     }
 
-    val showRoi: (Rect, Boolean) -> Unit = { r, l -> roi = r; roiLow = l }
     val previewUseCase = remember {
         Preview.Builder().build()
     }
@@ -580,32 +635,7 @@ private fun CameraPreview(
             finderAnalyzer.reset()
         }
     }
-    DisposableEffect(sensorManager, gyroSensor, finderEnabled) {
-        if (!finderEnabled || sensorManager == null || gyroSensor == null) {
-            gyroOmega = 0f
-            return@DisposableEffect onDispose {}
-        }
-        val listener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent) {
-                val values = event.values
-                if (values.size >= 3) {
-                    val omega = sqrt(
-                        values[0] * values[0] +
-                                values[1] * values[1] +
-                                values[2] * values[2]
-                    )
-                    gyroOmega = omega
-                }
-            }
 
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
-        }
-        sensorManager.registerListener(listener, gyroSensor, SensorManager.SENSOR_DELAY_GAME)
-        onDispose {
-            sensorManager.unregisterListener(listener)
-            gyroOmega = 0f
-        }
-    }
     LaunchedEffect(finderAnalyzer, gyroOmega) {
         finderAnalyzer.setGyroOmega(gyroOmega)
     }
@@ -756,10 +786,18 @@ private fun CameraPreview(
             context,
             object : GestureDetector.SimpleOnGestureListener() {
                 override fun onSingleTapUp(e: MotionEvent): Boolean {
+                    val w = previewView.width.takeIf { it > 0 } ?: return true
+                    val h = previewView.height.takeIf { it > 0 } ?: return true
+                    lastTap = PointF(
+                        (e.x / w.toFloat()).coerceIn(0f, 1f),
+                        (e.y / h.toFloat()).coerceIn(0f, 1f)
+                    )
+                    autoArmed = true
+                    lastTapAt = SystemClock.uptimeMillis()
+                    becameStableAt = 0L     // ← “古い安定時間”を捨てて、タップ後に安定を測り直す
+
                     val cam = currentCamera.value ?: return false
-                    if (previewView.width == 0 || previewView.height == 0) {
-                        return false
-                    }
+                    if (previewView.width == 0 || previewView.height == 0) return false
                     val factory = previewView.meteringPointFactory
                     val finder = currentFinderResult.value
                     if (currentFinderEnabled.value && finder != null) {
@@ -833,6 +871,7 @@ private fun CameraPreview(
                 }
 
                 override fun onLongPress(e: MotionEvent) {
+                    autoArmed = false
                     val w = previewView.width
                     val h = previewView.height
                     if (w == 0 || h == 0) return
@@ -841,7 +880,7 @@ private fun CameraPreview(
                     StillScan.ensureBirdness(
                         PointF(xNorm, yNorm),
                         previewView,
-                        showRoi
+                        showRoiFn          // ← showRoi → showRoiFn に変更
                     )
                 }
 
@@ -903,6 +942,20 @@ private fun CameraPreview(
         onDispose {
             previewView.setOnTouchListener(null)
         }
+    }
+
+    DisposableEffect(Unit) {
+        val sm = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val gyro = sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(e: SensorEvent) {
+                val wx = e.values[0]; val wy = e.values[1]; val wz = e.values[2]
+                gyroOmega = sqrt(wx*wx + wy*wy + wz*wz)  // 角速度の大きさ [rad/s]
+            }
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+        sm.registerListener(listener, gyro, SensorManager.SENSOR_DELAY_GAME)
+        onDispose { sm.unregisterListener(listener) }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
