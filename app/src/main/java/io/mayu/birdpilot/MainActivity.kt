@@ -1,11 +1,15 @@
 package io.mayu.birdpilot
 
+// NOTE: Shutter sound policy — play ONLY in flashListener. Do not add legacy wrappers.
+// Do NOT add/call: registerShutterSound(...), unregisterShutterSound(...), setShutterSoundEnabled(...)
+
 import android.Manifest
 import android.app.Activity
 import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.Matrix
+import android.graphics.PointF
+import android.graphics.Rect
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -31,8 +35,8 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
@@ -41,11 +45,12 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
-import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.core.UseCase
 import androidx.camera.core.ZoomState
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -54,13 +59,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.tween
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -68,31 +71,42 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.datastore.preferences.core.edit
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Observer
-import androidx.datastore.preferences.core.edit
+import io.mayu.birdpilot.finder.StillScan
+import io.mayu.birdpilot.overlay.RoiOverlay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -106,13 +120,6 @@ import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
-import kotlin.ranges.ClosedFloatingPointRange
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private var previewView: PreviewView? = null
@@ -155,24 +162,25 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    override fun dispatchKeyEvent(ev: KeyEvent): Boolean {
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (isCameraScreenVisible &&
-            (ev.keyCode == KeyEvent.KEYCODE_VOLUME_UP || ev.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
+            (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
         ) {
-            return when (ev.action) {
-                KeyEvent.ACTION_DOWN -> {
-                    if (ev.repeatCount == 0) {
-                        requestCapture()
-                    }
-                    true
-                }
-
-                KeyEvent.ACTION_UP -> true
-                else -> true
-            }
+            if (event.repeatCount == 0) requestCapture()
+            return true
         }
-        return super.dispatchKeyEvent(ev)
+        return super.onKeyDown(keyCode, event)
     }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (isCameraScreenVisible &&
+            (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
+        ) {
+            return true
+        }
+        return super.onKeyUp(keyCode, event)
+    }
+
 
     fun registerCameraComponents(preview: PreviewView, capture: ImageCapture) {
         previewView = preview
@@ -199,20 +207,6 @@ class MainActivity : ComponentActivity() {
         if (flashListener === listener) {
             flashListener = null
         }
-    }
-
-    fun registerShutterSound(sound: MediaActionSound) {
-        shutterSound = sound
-    }
-
-    fun unregisterShutterSound(sound: MediaActionSound) {
-        if (shutterSound === sound) {
-            shutterSound = null
-        }
-    }
-
-    fun setShutterSoundEnabled(enabled: Boolean) {
-        shutterSoundEnabled = enabled
     }
 
     fun requestCapture() {
@@ -317,7 +311,7 @@ fun BirdPilotApp() {
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         allPermissionsGranted = granted ||
-            ContextCompat.checkSelfPermission(context, cameraPermission) == PackageManager.PERMISSION_GRANTED
+                ContextCompat.checkSelfPermission(context, cameraPermission) == PackageManager.PERMISSION_GRANTED
     }
 
     LaunchedEffect(Unit) {
@@ -331,6 +325,8 @@ fun BirdPilotApp() {
     var galleryReloadSignal by remember { mutableStateOf(0) }
     var pendingDeleteCallback by remember { mutableStateOf<(() -> Unit)?>(null) }
     var pendingDeleteUri by remember { mutableStateOf<Uri?>(null) }
+    val scope = rememberCoroutineScope()
+    val finderEnabled by context.finderEnabledFlow.collectAsState(initial = false)
 
     val deleteRequestLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
@@ -432,7 +428,10 @@ fun BirdPilotApp() {
                     currentScreen == Screen.Camera -> CameraPreview(
                         lifecycleOwner = lifecycleOwner,
                         onGalleryClick = onGalleryClick,
-                        onSettingsClick = { currentScreen = Screen.Settings }
+                        onSettingsClick = { currentScreen = Screen.Settings },
+                        finderEnabled = finderEnabled,
+                        onToggleFinder = { v -> scope.launch { setFinderEnabled(context, v) } }
+
                     )
 
                     currentScreen == Screen.Gallery -> GalleryScreen(
@@ -483,12 +482,16 @@ private fun PermissionRequestView(onRequestPermission: () -> Unit) {
 private fun CameraPreview(
     lifecycleOwner: LifecycleOwner,
     onGalleryClick: () -> Unit,
-    onSettingsClick: () -> Unit
+    onSettingsClick: () -> Unit,
+    finderEnabled: Boolean,
+    onToggleFinder: (Boolean) -> Unit
 ) {
     val context = LocalContext.current
     val activity = context as? MainActivity
     val executor = remember { ContextCompat.getMainExecutor(context) }
     val density = LocalDensity.current
+    val haptics = LocalHapticFeedback.current
+    var focusRingStroke by remember { mutableFloatStateOf(2f) }
     val sensorManager = remember(context) {
         context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
     }
@@ -501,6 +504,16 @@ private fun CameraPreview(
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
     }
+    var roi by remember { mutableStateOf<Rect?>(null) }
+    var roiLow by remember { mutableStateOf(true) }
+    LaunchedEffect(roi) {
+        if (roi != null) {
+            kotlinx.coroutines.delay(1200)
+            roi = null
+        }
+    }
+
+    val showRoi: (Rect, Boolean) -> Unit = { r, l -> roi = r; roiLow = l }
     val previewUseCase = remember {
         Preview.Builder().build()
     }
@@ -547,7 +560,7 @@ private fun CameraPreview(
         }
         cameraProvider = provider
     }
-    var finderEnabled by remember { mutableStateOf(false) }
+
     var finderResult by remember { mutableStateOf<FinderResult?>(null) }
     val finderAlpha = remember { Animatable(0f) }
     val finderExecutor = remember {
@@ -578,8 +591,8 @@ private fun CameraPreview(
                 if (values.size >= 3) {
                     val omega = sqrt(
                         values[0] * values[0] +
-                            values[1] * values[1] +
-                            values[2] * values[2]
+                                values[1] * values[1] +
+                                values[2] * values[2]
                     )
                     gyroOmega = omega
                 }
@@ -643,6 +656,8 @@ private fun CameraPreview(
         }
     }
 
+    val shutterSoundOn by rememberUpdatedState(shutterSoundEnabled)
+
     DisposableEffect(activity, scope) {
         if (activity == null) {
             onDispose {
@@ -656,6 +671,11 @@ private fun CameraPreview(
                     flashJob = launch {
                         try {
                             flashAlpha.snapTo(0f)
+
+                            if (shutterSoundOn) runCatching {
+                                mediaActionSound.play(MediaActionSound.SHUTTER_CLICK)
+                            }
+
                             flashAlpha.animateTo(1f, tween(120))
                             flashAlpha.animateTo(0f, tween(180))
                         } finally {
@@ -728,21 +748,8 @@ private fun CameraPreview(
         }
     }
 
-    DisposableEffect(activity, mediaActionSound) {
-        val act = activity
-        if (act != null) {
-            act.registerShutterSound(mediaActionSound)
-            onDispose {
-                act.unregisterShutterSound(mediaActionSound)
-            }
-        } else {
-            onDispose { }
-        }
-    }
 
-    LaunchedEffect(activity, shutterSoundEnabled) {
-        activity?.setShutterSoundEnabled(shutterSoundEnabled)
-    }
+
 
     DisposableEffect(previewView) {
         val tapGestureDetector = GestureDetector(
@@ -767,9 +774,30 @@ private fun CameraPreview(
                             )
                                 .setAutoCancelDuration(3, TimeUnit.SECONDS)
                                 .build()
-                            cam.cameraControl.startFocusAndMetering(action)
+
+                            // 追加：タップ直後の軽い手応え（成功/失敗に関わらず）
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            scope.launch {
+                                focusRingStroke = 3f; delay(120); focusRingStroke = 2f
+                            }
+
+
+                            val future = cam.cameraControl.startFocusAndMetering(action)
+                            future.addListener({
+                                val ok = runCatching { future.get().isFocusSuccessful }.getOrDefault(false)
+                                if (ok) {
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    scope.launch {
+                                        focusRingStroke = 4f
+                                        delay(180)
+                                        focusRingStroke = 2f
+                                    }
+                                }
+                            }, executor)
+
                             focusRingPosition = finder.viewOffset
                             return true
+
                         }
                     }
                     val point = factory.createPoint(e.x, e.y)
@@ -779,9 +807,42 @@ private fun CameraPreview(
                     )
                         .setAutoCancelDuration(3, TimeUnit.SECONDS)
                         .build()
-                    cam.cameraControl.startFocusAndMetering(action)
+
+                    // 追加：タップ直後の軽い手応え（成功/失敗に関わらず）
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    scope.launch {
+                        focusRingStroke = 3f; delay(120); focusRingStroke = 2f
+                    }
+
+                    val future = cam.cameraControl.startFocusAndMetering(action)
+                    future.addListener({
+                        val ok = runCatching { future.get().isFocusSuccessful }.getOrDefault(false)
+                        if (ok) {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            scope.launch {
+                                focusRingStroke = 4f
+                                delay(180)
+                                focusRingStroke = 2f
+                            }
+                        }
+                    }, executor)
+
                     focusRingPosition = Offset(e.x, e.y)
                     return true
+
+                }
+
+                override fun onLongPress(e: MotionEvent) {
+                    val w = previewView.width
+                    val h = previewView.height
+                    if (w == 0 || h == 0) return
+                    val xNorm = (e.x / w.toFloat()).coerceIn(0f, 1f)
+                    val yNorm = (e.y / h.toFloat()).coerceIn(0f, 1f)
+                    StillScan.ensureBirdness(
+                        PointF(xNorm, yNorm),
+                        previewView,
+                        showRoi
+                    )
                 }
 
                 override fun onDoubleTap(e: MotionEvent): Boolean {
@@ -830,9 +891,12 @@ private fun CameraPreview(
             }
         )
 
-        previewView.setOnTouchListener { _, event ->
+        previewView.setOnTouchListener { view, event ->
             val handledScale = scaleGestureDetector.onTouchEvent(event)
-            val handledTap = tapGestureDetector.onTouchEvent(event)
+            val handledTap   = tapGestureDetector.onTouchEvent(event)
+            if (event.action == MotionEvent.ACTION_UP && handledTap && !handledScale) {
+                view.performClick()
+            }
             handledScale || handledTap
         }
 
@@ -846,6 +910,13 @@ private fun CameraPreview(
             modifier = Modifier.fillMaxSize(),
             factory = { previewView }
         )
+
+        RoiOverlay(
+            modifier = Modifier.fillMaxSize(),
+            roi = roi,
+            lowConfidence = roiLow
+        )
+
 
         if (showGrid) {
             Canvas(modifier = Modifier.fillMaxSize()) {
@@ -905,7 +976,8 @@ private fun CameraPreview(
                     .offset { offset }
                     .size(focusSize)
                     .clip(CircleShape)
-                    .border(width = 2.dp, color = Color.White, shape = CircleShape)
+                    .border(width = focusRingStroke.dp, color = Color.White, shape = CircleShape)
+
             )
         }
 
@@ -929,13 +1001,15 @@ private fun CameraPreview(
             FinderToggleButton(
                 isEnabled = finderEnabled,
                 onToggle = {
-                    finderEnabled = !finderEnabled
-                    if (!finderEnabled) {
+                    val newValue = !finderEnabled
+                    onToggleFinder(newValue)          // ← 親へ反映
+                    if (!newValue) {                  // ← OFFにしたときだけローカルをリセット
                         finderAnalyzer.reset()
                         finderResult = null
                     }
                 }
             )
+
 
             GridToggleButton(
                 isEnabled = showGrid,
@@ -1274,10 +1348,9 @@ private class FinderAnalyzer(
 
             val centroidX = blob.sumX.toFloat() / blob.area
             val centroidY = blob.sumY.toFloat() / blob.area
-            val meteringFactory = SurfaceOrientedMeteringPointFactory(width.toFloat(), height.toFloat())
-            val meteringPoint = meteringFactory.createPoint(centroidX, centroidY)
-            var normalizedX = meteringPoint.x.coerceIn(0f, 1f)
-            var normalizedY = meteringPoint.y.coerceIn(0f, 1f)
+            var normalizedX = (centroidX / width.toFloat()).coerceIn(0f, 1f)
+            var normalizedY = (centroidY / height.toFloat()).coerceIn(0f, 1f)
+
 
             val currentX = emaX
             val currentY = emaY
@@ -1337,12 +1410,11 @@ private class FinderAnalyzer(
             val viewOffset = projectToPreview(normalizedX, normalizedY)
             if (viewOffset != null) {
                 hasLastResult = true
-                val meteringPoint = previewView.meteringPointFactory.createPoint(viewOffset.x, viewOffset.y)
                 onResult(
                     FinderResult(
                         viewOffset = viewOffset,
-                        normalizedX = meteringPoint.x.coerceIn(0f, 1f),
-                        normalizedY = meteringPoint.y.coerceIn(0f, 1f),
+                        normalizedX = normalizedX,
+                        normalizedY = normalizedY,
                         timestamp = timestamp
                     )
                 )
@@ -1351,23 +1423,19 @@ private class FinderAnalyzer(
                 onResult(null)
             }
         }
+
     }
 
     private fun projectToPreview(normalizedX: Float, normalizedY: Float): Offset? {
-        val transform = previewView.outputTransform
-        val width = previewView.width
-        val height = previewView.height
-        if (transform != null) {
-            val matrix = Matrix(transform.matrix)
-            val points = floatArrayOf(normalizedX * 2f - 1f, normalizedY * 2f - 1f)
-            matrix.mapPoints(points)
-            return Offset(points[0], points[1])
-        }
-        if (width == 0 || height == 0) {
-            return null
-        }
-        return Offset(normalizedX * width.toFloat(), normalizedY * height.toFloat())
+        val w = previewView?.width ?: return null
+        val h = previewView?.height ?: return null
+        if (w == 0 || h == 0) return null
+        return Offset(
+            normalizedX.coerceIn(0f, 1f) * w,
+            normalizedY.coerceIn(0f, 1f) * h
+        )
     }
+
 
     private fun extractYPlane(image: ImageProxy): ByteArray? {
         if (image.planes.isEmpty()) {
