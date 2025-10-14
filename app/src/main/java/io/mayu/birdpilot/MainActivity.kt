@@ -64,6 +64,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -100,6 +101,8 @@ import androidx.core.content.ContextCompat
 import androidx.datastore.preferences.core.edit
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Observer
+import io.mayu.birdpilot.detector.BirdDetector
+import io.mayu.birdpilot.detector.DetectorGate
 import io.mayu.birdpilot.finder.StillScan
 import io.mayu.birdpilot.overlay.RoiOverlay
 import kotlinx.coroutines.Dispatchers
@@ -501,15 +504,22 @@ private fun CameraPreview(
     }
     val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
 
+    val detectorGate = remember { DetectorGate(minIntervalMs = 500L) }
+    val birdDetector = remember { BirdDetector.heuristic() }
     var roi     by remember { mutableStateOf<Rect?>(null) }
-    var roiLow  by remember { mutableStateOf(true) }
+    var roiScore by remember { mutableStateOf<Float?>(null) }
+    var perchAssistActive by remember { mutableStateOf(false) }
 
     var gyroOmega by remember { mutableStateOf(0f) }      // ← これを1つだけ残す（L529の方を採用）
     var autoArmed by remember { mutableStateOf(false) }
     var lastTapAt by remember { mutableLongStateOf(0L) }
 
 
-    val showRoiFn: (Rect, Boolean) -> Unit = { r, l -> roi = r; roiLow = l }
+    val showRoiFn: (Rect, Float?) -> Unit = { r, score ->
+        roi = r
+        roiScore = score
+        perchAssistActive = score != null && score >= 0.4f
+    }
 
     // --- Stability auto-fire params ---
     val stableOmega = 0.18f      // 角速度しきい値（弱すぎ/強すぎなら後で微調整）
@@ -546,7 +556,13 @@ private fun CameraPreview(
                 ) {
                     lastAutoFireAt = now
                     autoArmed = false                     // 1回だけ
-                    StillScan.ensureBirdness(lastTap, previewView, showRoiFn)
+                    StillScan.ensureBirdness(
+                        lastTap,
+                        previewView,
+                        detectorGate,
+                        birdDetector,
+                        showRoiFn
+                    )
                 }
             }
             kotlinx.coroutines.delay(50)  // 20Hzポーリング
@@ -566,6 +582,8 @@ private fun CameraPreview(
         if (roi != null) {
             kotlinx.coroutines.delay(1200)
             roi = null
+            roiScore = null
+            perchAssistActive = false
         }
     }
 
@@ -880,6 +898,8 @@ private fun CameraPreview(
                     StillScan.ensureBirdness(
                         PointF(xNorm, yNorm),
                         previewView,
+                        detectorGate,
+                        birdDetector,
                         showRoiFn          // ← showRoi → showRoiFn に変更
                     )
                 }
@@ -967,8 +987,26 @@ private fun CameraPreview(
         RoiOverlay(
             modifier = Modifier.fillMaxSize(),
             roi = roi,
-            lowConfidence = roiLow
+            score = roiScore
         )
+
+        if (perchAssistActive) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 96.dp)
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    text = "Perch Assist ×1.6–×2.0",
+                    color = Color(0xFF7CB342),
+                    fontSize = 16.sp,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
 
 
         if (showGrid) {
