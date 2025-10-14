@@ -11,16 +11,22 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 
 @Composable
-fun RoiOverlay(modifier: Modifier = Modifier, roi: Rect?, lowConfidence: Boolean) {
+fun RoiOverlay(modifier: Modifier = Modifier, roi: Rect?, score: Float?) {
     Canvas(modifier = modifier) {
         roi ?: return@Canvas
 
-        // 点線の枠（低確度は細め）
-        val dash = PathEffect.dashPathEffect(floatArrayOf(14f, 10f), 0f)
-        val stroke = Stroke(width = if (lowConfidence) 4f else 6f, pathEffect = dash)
+        val highConfidence = score != null && score >= 0.4f
+        val lowConfidence = score == null
 
-        // 黄系の色（低確度は少し薄め）
-        val color = if (lowConfidence) Color.Yellow.copy(alpha = 0.9f) else Color.Yellow
+        val dash = if (highConfidence) null else PathEffect.dashPathEffect(floatArrayOf(14f, 10f), 0f)
+        val strokeWidth = if (highConfidence) 6f else 4f
+        val stroke = Stroke(width = strokeWidth, pathEffect = dash)
+
+        val color = when {
+            highConfidence -> Color(0xFF4CAF50)
+            lowConfidence -> Color.Yellow.copy(alpha = 0.9f)
+            else -> Color.Yellow
+        }
 
         drawRect(
             color = color, // ← 必須
