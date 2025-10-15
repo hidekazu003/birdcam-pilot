@@ -68,3 +68,31 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
 }
+
+// --- C1 verify task (Groovy DSL) ---
+tasks.register("verifyC1") {
+    doLast {
+        def f = file("src/main/java/io/mayu/birdpilot/MainActivity.kt")
+        def s = f.getText("UTF-8")
+
+        def need = { String msg, boolean ok ->
+            if (!ok) throw new GradleException("C1 guard failed: ${msg}")
+        }
+
+        need("markers missing",
+                s.contains("C1_AUTOFIRE_BEGIN") && s.contains("C1_AUTOFIRE_END"))
+
+        need("auto-fire loop missing",
+                (s =~ /LaunchedEffect\(Unit\)/).find())
+
+        need("armed path missing",
+                s.contains("autoArmed") && s.contains("lastTapAt"))
+
+        need("call path missing",
+                s.contains("tryEnsureBirdness("))
+
+        need("holdMs/cooldownMs missing",
+                s.contains("holdMs") && s.contains("cooldownMs"))
+    }
+}
+

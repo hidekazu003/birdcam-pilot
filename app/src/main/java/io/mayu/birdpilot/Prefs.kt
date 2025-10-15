@@ -8,7 +8,16 @@ import androidx.datastore.preferences.core.edit
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.floatPreferencesKey
 
+val ROI_THRESHOLD_KEY = floatPreferencesKey("roi_threshold")   // 0.4f 既定
+
+fun roiThresholdFlow(context: Context): Flow<Float> =
+    context.cameraPreferenceDataStore.data.map { it[ROI_THRESHOLD_KEY] ?: 0.4f }
+
+suspend fun setRoiThreshold(context: Context, value: Float) {
+    context.cameraPreferenceDataStore.edit { it[ROI_THRESHOLD_KEY] = value }
+}
 
 // DataStore (Preferences) をアプリ全体で共有
 val Context.cameraPreferenceDataStore by preferencesDataStore(name = "camera_preferences")

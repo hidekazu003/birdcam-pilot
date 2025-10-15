@@ -34,6 +34,13 @@ import androidx.compose.ui.unit.dp
 import androidx.datastore.preferences.core.edit
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import androidx.compose.material3.Slider
+import java.util.Locale
+
+// Prefs のAPIを使う場合（おすすめ）
+import io.mayu.birdpilot.roiThresholdFlow
+import io.mayu.birdpilot.setRoiThreshold
+
 
 @Composable
 fun SettingsScreen(
@@ -75,6 +82,7 @@ fun SettingsScreen(
                     modifier = Modifier.align(Alignment.CenterStart)
                 ) {
                     Text(text = "← 戻る")
+
                 }
                 Text(
                     text = "設定",
@@ -85,6 +93,44 @@ fun SettingsScreen(
                 )
             }
 
+            Spacer(modifier = Modifier.height(32.dp))
+
+// === 判定しきい値（GREEN にする最小 score） ===
+            val roiTh by roiThresholdFlow(context).collectAsState(initial = 0.4f)
+            val shown = remember(roiTh) { String.format(Locale.US, "%.2f", roiTh) }
+
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "判定しきい値（GREEN判定の最小score）",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Slider(
+                        value = roiTh.coerceIn(0.3f, 0.8f),
+                        onValueChange = { v ->
+                            // ドラッグ中も即反映
+                            coroutineScope.launch { setRoiThreshold(context, v.coerceIn(0.3f, 0.8f)) }
+                        },
+                        valueRange = 0.3f..0.8f,
+                        steps = 5, // 0.3,0.35,...,0.8
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = shown,
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -93,6 +139,8 @@ fun SettingsScreen(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    Spacer(modifier = Modifier.height(24.dp))
+
                     Text(
                         text = "シャッター音",
                         color = Color.White,
@@ -168,5 +216,9 @@ fun SettingsScreen(
                 }
             }
         }
+
+
+
+
     }
 }

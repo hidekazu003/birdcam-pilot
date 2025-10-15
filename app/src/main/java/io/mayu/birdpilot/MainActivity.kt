@@ -125,6 +125,7 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
+private const val TAG = "BirdPilot"
 class MainActivity : ComponentActivity() {
     private var previewView: PreviewView? = null
     private var imageCapture: ImageCapture? = null
@@ -491,6 +492,7 @@ private fun CameraPreview(
     onToggleFinder: (Boolean) -> Unit
 ) {
     val context = LocalContext.current
+    val roiTh by roiThresholdFlow(context).collectAsState(initial = 0.4f)
     val activity = context as? MainActivity
     val executor = remember { ContextCompat.getMainExecutor(context) }
     val density = LocalDensity.current
@@ -508,74 +510,94 @@ private fun CameraPreview(
     val birdDetector = remember { BirdDetector.heuristic() }
     var roi     by remember { mutableStateOf<Rect?>(null) }
     var roiScore by remember { mutableStateOf<Float?>(null) }
+    var roiJudge by remember { mutableStateOf("—") }   // "GREEN"/"YELLOW" を入れる
     var perchAssistActive by remember { mutableStateOf(false) }
 
     var gyroOmega by remember { mutableStateOf(0f) }      // ← これを1つだけ残す（L529の方を採用）
-    var autoArmed by remember { mutableStateOf(false) }
-    var lastTapAt by remember { mutableLongStateOf(0L) }
-
 
     val showRoiFn: (Rect, Float?) -> Unit = { r, score ->
         roi = r
         roiScore = score
-        perchAssistActive = score != null && score >= 0.4f
+        perchAssistActive = (score != null && score >= roiTh)
+        Log.d(TAG, "ROI ${if (perchAssistActive) "GREEN" else "YELLOW"} score=${score ?: -1f}")
+        roiJudge = if ((score ?: -1f) >= roiTh) "GREEN" else "YELLOW"
+        Log.d(TAG, "HUD judge=$roiJudge score=${score ?: -1f}")
     }
 
-    // --- Stability auto-fire params ---
-    val stableOmega = 0.18f      // 角速度しきい値（弱すぎ/強すぎなら後で微調整）
-    val holdMs = 400L            // 安定が続く時間
-    val cooldownMs = 1200L       // 連続起動のクールダウン
-    val armDelayMs = 350L   // タップ直後は最低 300ms 待ってから自動発火
+    // --- C2 gate + logger (最小) ---
+    var lastDetectAt by remember { mutableLongStateOf(0L) }
 
-    var becameStableAt by remember { mutableLongStateOf(0L) }
-    var lastAutoFireAt by remember { mutableLongStateOf(0L) }
-
-// 最終タップ位置（未タップ時は中央）
-    var lastTap by remember { mutableStateOf(PointF(0.5f, 0.5f)) }
-
-// gyroの値を定期ポーリングして安定を検知（snapshotFlowを使わない版）
-    LaunchedEffect(Unit) {
-        while (true) {
-            val now = SystemClock.uptimeMillis()
-            val omega = gyroOmega
-
-            val armedAndWaited = autoArmed && (now - lastTapAt) >= armDelayMs
-            val stable         = kotlin.math.abs(omega) < stableOmega
-
-            if (!armedAndWaited || !stable) {
-                // まだ武装直後の待ち中 or 動いている → 安定時間はリセット
-                becameStableAt = 0L
-            } else {
-                // ここから“安定”カウント開始
-                if (becameStableAt == 0L) becameStableAt = now
-                val stableFor = now - becameStableAt
-
-                if (stableFor >= holdMs &&
-                    now - lastAutoFireAt >= cooldownMs &&
-                    previewView.width > 0 && previewView.height > 0
-                ) {
-                    lastAutoFireAt = now
-                    autoArmed = false                     // 1回だけ
-                    StillScan.ensureBirdness(
-                        lastTap,
-                        previewView,
-                        detectorGate,
-                        birdDetector,
-                        showRoiFn
-                    )
-                }
-            }
-            kotlinx.coroutines.delay(50)  // 20Hzポーリング
-
-
-
-
-            kotlinx.coroutines.delay(50) // 20Hz で監視
+    val tryEnsureBirdness: (PointF) -> Unit = { pt ->
+        val now = SystemClock.uptimeMillis()
+        val delta = now - lastDetectAt
+        if (delta < 500L) {
+            Log.d(TAG, "C2 skip: ${delta}ms (<500)")
+        } else {
+            lastDetectAt = now
+            Log.d(TAG, "C2 call: ensureBirdness at (${pt.x}, ${pt.y})")
+            // 位置引数で統一（名前付き引数は使わない）
+            StillScan.ensureBirdness(pt, previewView, detectorGate, birdDetector, showRoiFn)
         }
     }
 
 
+    // ========== C1_AUTOFIRE_BEGIN (do-not-remove) ==========
+// C1: stability auto-fire (armDelayMs/holdMs/cooldownMs) + EMA + Hysteresis + recentQuiet
 
+// --- Stability auto-fire params (C1) ---
+    val stableOmega = 0.18f
+    val holdMs      = 600L
+    val armDelayMs  = 350L
+    val cooldownMs  = 1200L
+
+// --- C1 安定判定の堅牢化（EMA + ヒステリシス） ---
+    val stableOmegaEnter = 0.14f
+    val stableOmegaExit  = 0.25f
+    var gyroEma          by remember { mutableFloatStateOf(0f) }
+    var stableLatched    by remember { mutableStateOf(false) }
+    var lastOverExitAt   by remember { mutableLongStateOf(0L) }
+
+// C1 state
+    var becameStableAt by remember { mutableLongStateOf(0L) }
+    var lastAutoFireAt by remember { mutableLongStateOf(0L) }
+    var autoArmed      by remember { mutableStateOf(false) }
+    var lastTapAt      by remember { mutableLongStateOf(0L) }
+    var lastTap        by remember { mutableStateOf(PointF(0.5f, 0.5f)) }
+
+// タップ後の安定を監視して 1回だけ発火
+    LaunchedEffect(Unit) {
+        while (true) {
+            val now = SystemClock.uptimeMillis()
+
+            // EMA更新・ヒステリシス
+            gyroEma = 0.2f * gyroOmega + 0.8f * gyroEma
+            if (stableLatched) {
+                if (gyroEma > stableOmegaExit) stableLatched = false
+            } else {
+                if (gyroEma < stableOmegaEnter) stableLatched = true
+            }
+            if (gyroOmega > stableOmegaExit) lastOverExitAt = now
+            val recentQuiet = (now - lastOverExitAt) >= 800L
+
+            val armedAndWaited = autoArmed && (now - lastTapAt) >= armDelayMs
+            val stable = stableLatched
+
+            if (!armedAndWaited || !stable || !recentQuiet) {
+                becameStableAt = 0L
+            } else {
+                if (becameStableAt == 0L) becameStableAt = now
+                val stableFor = now - becameStableAt
+                if (stableFor >= holdMs && (now - lastAutoFireAt) >= cooldownMs) {
+                    lastAutoFireAt = now
+                    autoArmed = false
+                    Log.d(TAG, "C1 fire")
+                    tryEnsureBirdness(lastTap)       // C2ゲート経由
+                }
+            }
+            kotlinx.coroutines.delay(50)             // 20Hz
+        }
+    }
+// ========== C1_AUTOFIRE_END ==========
 
 
     LaunchedEffect(roi) {
@@ -895,13 +917,13 @@ private fun CameraPreview(
                     if (w == 0 || h == 0) return
                     val xNorm = (e.x / w.toFloat()).coerceIn(0f, 1f)
                     val yNorm = (e.y / h.toFloat()).coerceIn(0f, 1f)
-                    StillScan.ensureBirdness(
-                        PointF(xNorm, yNorm),
-                        previewView,
-                        detectorGate,
-                        birdDetector,
-                        showRoiFn          // ← showRoi → showRoiFn に変更
-                    )
+
+// 追加：長押しトリガーのログ
+                    Log.d(TAG, "LP fire x=$xNorm, y=$yNorm")
+
+// C2ゲート経由で呼ぶ（skip/call ログも内部で出る）
+                    tryEnsureBirdness(PointF(xNorm, yNorm))
+
                 }
 
                 override fun onDoubleTap(e: MotionEvent): Boolean {
@@ -1087,6 +1109,17 @@ private fun CameraPreview(
             ZoomIndicator(
                 zoomRatio = zoomRatio,
                 alpha = overlayAlpha
+            )
+
+            // HUD: ROI の判定と score を右上に表示
+            Text(
+                text = "ROI $roiJudge  score=${String.format(Locale.US, "%.2f", roiScore ?: -1f)}",
+                color = Color.White,
+                fontSize = 14.sp,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0x88000000))
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
             )
 
             FinderToggleButton(
