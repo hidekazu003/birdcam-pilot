@@ -74,6 +74,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -121,6 +122,9 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
+private const val TAG = "BirdPilot"
+private const val DETECT_MIN_INTERVAL_MS = 500L
+
 class MainActivity : ComponentActivity() {
     private var previewView: PreviewView? = null
     private var imageCapture: ImageCapture? = null
@@ -147,6 +151,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Log.i(TAG, "smoke: app started v1")
         mainExecutor = ContextCompat.getMainExecutor(this)
         cameraExecutor = Executors.newSingleThreadExecutor()
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -326,7 +331,7 @@ fun BirdPilotApp() {
     var pendingDeleteCallback by remember { mutableStateOf<(() -> Unit)?>(null) }
     var pendingDeleteUri by remember { mutableStateOf<Uri?>(null) }
     val scope = rememberCoroutineScope()
-    val finderEnabled by context.finderEnabledFlow.collectAsState(initial = false)
+    val finderEnabled by finderEnabledFlow(context).collectAsState(initial = true)
 
     val deleteRequestLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
@@ -487,6 +492,30 @@ private fun CameraPreview(
     onToggleFinder: (Boolean) -> Unit
 ) {
     val context = LocalContext.current
+    var gyroOmega by remember { mutableStateOf(0f) }
+
+    // Gyro (rad/s) を購読して gyroOmega を更新
+    DisposableEffect(Unit) {
+        val sm = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val sensor = sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+
+        // 端末の角速度ベクトルの大きさを計算
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(e: SensorEvent) {
+                val x = e.values[0]; val y = e.values[1]; val z = e.values[2]
+                gyroOmega = kotlin.math.sqrt(x*x + y*y + z*z)
+            }
+            override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+        }
+
+        if (sensor != null) {
+            sm.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_GAME)
+        } else {
+            Log.w(TAG, "gyro sensor not available")
+        }
+        onDispose { sm.unregisterListener(listener) }
+    }
+
     val activity = context as? MainActivity
     val executor = remember { ContextCompat.getMainExecutor(context) }
     val density = LocalDensity.current
@@ -498,7 +527,7 @@ private fun CameraPreview(
     val gyroSensor = remember(sensorManager) {
         sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
     }
-    var gyroOmega by remember { mutableStateOf(0f) }
+
     val previewView = remember {
         PreviewView(context).apply {
             scaleType = PreviewView.ScaleType.FILL_CENTER
@@ -514,6 +543,90 @@ private fun CameraPreview(
     }
 
     val showRoi: (Rect, Boolean) -> Unit = { r, l -> roi = r; roiLow = l }
+
+    // ========== C1_AUTOFIRE_BEGIN (do-not-remove) ==========
+    // C1: stability auto-fire (armDelayMs/holdMs/cooldownMs)
+    // ヒステリシス + EMA + recentQuiet ガード
+    // （このブロックは仕様上 必須。変更時は動作等価を維持すること）
+    // ... C1 定数・state・LaunchedEffect(Unit) ループ ここ・・・
+    /* tryEnsureBirdness(lastTap) まで含める */
+    //
+
+    // --- Stability auto-fire params (C1) ---
+    val stableOmega = 0.18f      // 角速度しきい値（屋外は 0.20〜0.22 に上げてもOK）
+    val holdMs      = 400L       // “安定”が続く時間
+    val armDelayMs  = 350L       // タップ直後の最短待ち
+    val cooldownMs  = 1200L      // 連続起動のクールダウン
+
+    // --- C1 安定判定の堅牢化（EMA + ヒステリシス） ---
+    val stableOmegaEnter = 0.12f  // 安定に「入る」しきい値（屋外 0.18→0.20 目安）
+    val stableOmegaExit  = 0.22f  // 安定から「抜ける」しきい値（Enter より高め）
+    var lastOverExitAt   by remember { mutableLongStateOf(0L) }  // 直近でωがExitを超えた時刻
+    var gyroEma          by remember { mutableFloatStateOf(0f) }   // 平滑化用
+    var stableLatched    by remember { mutableStateOf(false) }     // 安定ラッチ
+
+    var becameStableAt  by remember { mutableLongStateOf(0L) }
+    var lastAutoFireAt  by remember { mutableLongStateOf(0L) }
+    var autoArmed       by remember { mutableStateOf(false) }
+    var lastTapAt       by remember { mutableLongStateOf(0L) }
+    var lastTap         by remember { mutableStateOf(PointF(0.5f, 0.5f)) }
+
+    // --- C2 gate + logger (最小) ---
+    var lastDetectAt by remember { mutableLongStateOf(0L) }
+
+    val tryEnsureBirdness: (PointF) -> Unit = { pt ->
+        val now = SystemClock.uptimeMillis()
+        val delta = now - lastDetectAt
+        if (delta < DETECT_MIN_INTERVAL_MS) {
+            Log.d(TAG, "C2 skip: ${delta}ms (<$DETECT_MIN_INTERVAL_MS)")
+        } else {
+            lastDetectAt = now
+            Log.d(TAG, "C2 call: ensureBirdness at (${pt.x}, ${pt.y})")
+            // いまは最小構成：既存の ensureBirdness を直呼び（後でDetectorへ差し替え）
+            StillScan.ensureBirdness(pt, previewView, showRoi)
+        } // ← close else
+    }
+
+    // タップ後の安定を監視して 1回だけ C2 を呼ぶ（C1の自動発火）
+    LaunchedEffect(Unit) {
+        while (true) {
+            val now = SystemClock.uptimeMillis()
+            val armedAndWaited = autoArmed && (now - lastTapAt) >= armDelayMs
+            // 低速EMA（α=0.2）
+            gyroEma = 0.2f * gyroOmega + 0.8f * gyroEma
+
+            // ヒステリシスでラッチ
+            if (stableLatched) {
+                if (gyroEma > stableOmegaExit) stableLatched = false
+            } else {
+                if (gyroEma < stableOmegaEnter) stableLatched = true
+            }
+
+            val stable = stableLatched
+
+            // 直近に大きく揺れていないか（例: 600msは要調整）
+            if (gyroOmega > stableOmegaExit) lastOverExitAt = now
+            val recentQuiet = (now - lastOverExitAt) >= 700L
+
+            // ここから下の判定を入れ替え
+            if (!armedAndWaited || !stable || !recentQuiet) {
+                becameStableAt = 0L
+            } else {
+                if (becameStableAt == 0L) becameStableAt = now
+                val stableFor = now - becameStableAt
+                if (stableFor >= holdMs && (now - lastAutoFireAt) >= cooldownMs) {
+                    lastAutoFireAt = now
+                    autoArmed = false
+                    tryEnsureBirdness(lastTap)
+                }
+            }
+
+            kotlinx.coroutines.delay(50)              // 20Hzポーリング
+        }
+    }
+
+    // ========== C1_AUTOFIRE_END ==========
+
     val previewUseCase = remember {
         Preview.Builder().build()
     }
@@ -756,6 +869,18 @@ private fun CameraPreview(
             context,
             object : GestureDetector.SimpleOnGestureListener() {
                 override fun onSingleTapUp(e: MotionEvent): Boolean {
+                    // タップ位置を0..1正規化で記録＋武装
+                    val w = previewView.width.takeIf { it > 0 } ?: return false
+                    val h = previewView.height.takeIf { it > 0 } ?: return false
+
+                    lastTap = PointF(
+                        (e.x / w.toFloat()).coerceIn(0f, 1f),
+                        (e.y / h.toFloat()).coerceIn(0f, 1f)
+                    )
+                    autoArmed = true
+                    lastTapAt = SystemClock.uptimeMillis()
+                    becameStableAt = 0L
+
                     val cam = currentCamera.value ?: return false
                     if (previewView.width == 0 || previewView.height == 0) {
                         return false
@@ -838,11 +963,8 @@ private fun CameraPreview(
                     if (w == 0 || h == 0) return
                     val xNorm = (e.x / w.toFloat()).coerceIn(0f, 1f)
                     val yNorm = (e.y / h.toFloat()).coerceIn(0f, 1f)
-                    StillScan.ensureBirdness(
-                        PointF(xNorm, yNorm),
-                        previewView,
-                        showRoi
-                    )
+                    tryEnsureBirdness(PointF(xNorm, yNorm))
+
                 }
 
                 override fun onDoubleTap(e: MotionEvent): Boolean {
