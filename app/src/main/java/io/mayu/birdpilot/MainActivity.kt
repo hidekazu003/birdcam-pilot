@@ -498,6 +498,7 @@ private fun CameraPreview(
 ) {
     val context = LocalContext.current
     val roiTh by roiThresholdFlow(context).collectAsState(initial = 0.4f)
+    val frameScale by roiFrameScaleFlow(context).collectAsState(initial = 1.0f)
     val activity = context as? MainActivity
     val executor = remember { ContextCompat.getMainExecutor(context) }
     val density = LocalDensity.current
@@ -525,8 +526,22 @@ private fun CameraPreview(
     var gyroOmega by remember { mutableStateOf(0f) }      // ← これを1つだけ残す（L529の方を採用）
 
     val showRoiFn: (Rect, Float?) -> Unit = { r, score ->
-        roi = r
+        // もらったROI r を frameScale 倍で拡大/縮小（中心基準、画面内にクランプ）
+        val scaled = if (frameScale == 1.0f) r else Rect().apply {
+            val cx = r.centerX()
+            val cy = r.centerY()
+            val halfW = (r.width()  * frameScale / 2f).toInt()
+            val halfH = (r.height() * frameScale / 2f).toInt()
+            val w = previewView.width
+            val h = previewView.height
+            left   = (cx - halfW).coerceIn(0, (w - 2).coerceAtLeast(0))
+            top    = (cy - halfH).coerceIn(0, (h - 2).coerceAtLeast(0))
+            right  = (cx + halfW).coerceIn(left + 1, w.coerceAtLeast(left + 1))
+            bottom = (cy + halfH).coerceIn(top + 1,  h.coerceAtLeast(top + 1))
+        }
+        roi = scaled
         roiScore = score
+
         val hud = hudState(score, roiTh)
         val becameGreen = hud == Hud.GREEN && lastHud != Hud.GREEN
         lastHud = hud
@@ -535,26 +550,6 @@ private fun CameraPreview(
         roiJudge = hud.name
         Log.d(TAG, "HUD judge=$roiJudge score=${score ?: -1f}")
 
-        if (becameGreen) {
-            val now = SystemClock.uptimeMillis()
-            if (now - lastPerchAt >= PERCH_COOLDOWN_MS) {
-                val cam = currentCamera.value
-                val zoomState: ZoomState? = cam?.cameraInfo?.zoomState?.value
-                if (cam != null && zoomState != null) {
-                    val currentRatio = zoomState.zoomRatio
-                    val target = min(min(currentRatio * ASSIST_X, MAX_ASSIST_X), zoomState.maxZoomRatio)
-                    if (target > currentRatio) {
-                        lastPerchAt = now
-                        Log.d(TAG, "PA fire: $currentRatio -> $target")
-                        perchAssistScope.launch {
-                            withContext(Dispatchers.Main) {
-                                cam.cameraControl.setZoomRatio(target)
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 
     // --- C2 gate + logger (最小) ---
@@ -833,6 +828,31 @@ private fun CameraPreview(
     val currentLinearZoom = rememberUpdatedState(linearZoom)
     val currentFinderEnabled = rememberUpdatedState(finderEnabled)
     val currentFinderResult = rememberUpdatedState(finderResult)
+
+    // Perch Assist: ROI が GREEN に“遷移”した瞬間に一度だけズーム（1.6x / 上限2.0x）
+    var lastJudge by remember { mutableStateOf("—") }
+
+    LaunchedEffect(roiJudge) {
+
+        // 直前がGREENでない → GREEN に変わった瞬間だけ
+        if (lastJudge != "GREEN" && roiJudge == "GREEN") {
+            val now = SystemClock.uptimeMillis()
+            if (now - lastPerchAt < PERCH_COOLDOWN_MS) return@LaunchedEffect
+            lastPerchAt = now
+
+            val cam = currentCamera.value ?: return@LaunchedEffect
+            val zoomState = cam.cameraInfo.zoomState.value ?: return@LaunchedEffect
+            val current = zoomState.zoomRatio
+            val target = minOf(current * ASSIST_X, MAX_ASSIST_X, zoomState.maxZoomRatio)
+
+
+            withContext(Dispatchers.Main) {
+                cam.cameraControl.setZoomRatio(target)
+            }
+            Log.d(TAG, "PA fire: $current -> $target")
+        }
+        lastJudge = roiJudge
+    }
 
     DisposableEffect(mediaActionSound) {
         onDispose {
