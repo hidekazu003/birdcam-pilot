@@ -96,3 +96,7 @@ tasks.register("verifyC1") {
     }
 }
 
+tasks.register("verifyC2") {
+    dependsOn("testDebugUnitTest", "lint")
+}
+
