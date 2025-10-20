@@ -215,8 +215,44 @@ fun SettingsScreen(
                     }
                 }
             }
-        }
 
+            // === ROI枠サイズプリセット（表示の見やすさ調整） ===
+            val frameScale by roiFrameScaleFlow(context).collectAsState(initial = 1.0f)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "ROI枠サイズ（見やすさ）",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val options = listOf(
+                        0.8f to "−20%",
+                        1.0f to "標準",
+                        1.2f to "+20%"
+                    )
+                    options.forEach { (value, label) ->
+                        FilterChip(
+                            selected = (frameScale == value),
+                            onClick = {
+                                coroutineScope.launch { setRoiFrameScale(context, value) }
+                            },
+                            label = { Text(text = label) },
+                            modifier = Modifier
+                                .padding(end = 8.dp)
+                        )
+                    }
+                }
+            }
+
+        }
 
 
 

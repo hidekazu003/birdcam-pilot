@@ -19,6 +19,20 @@ suspend fun setRoiThreshold(context: Context, value: Float) {
     context.cameraPreferenceDataStore.edit { it[ROI_THRESHOLD_KEY] = value }
 }
 
+// --- ROI frame scale preset -----------------------------------------------
+// 0.8 (= -20%), 1.0 (= default), 1.2 (= +20%)
+private val ROI_FRAME_SCALE_KEY = floatPreferencesKey("roi_frame_scale")
+
+/** 現在の ROI 枠スケール。存在しなければ 1.0f を返す */
+fun roiFrameScaleFlow(context: Context): Flow<Float> =
+    context.cameraPreferenceDataStore.data.map { it[ROI_FRAME_SCALE_KEY] ?: 1.0f }
+
+/** ROI 枠スケールを保存（0.8..1.2 に丸め） */
+suspend fun setRoiFrameScale(context: Context, value: Float) {
+    val v = value.coerceIn(0.8f, 1.2f)
+    context.cameraPreferenceDataStore.edit { it[ROI_FRAME_SCALE_KEY] = v }
+}
+
 // DataStore (Preferences) をアプリ全体で共有
 val Context.cameraPreferenceDataStore by preferencesDataStore(name = "camera_preferences")
 
