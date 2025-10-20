@@ -103,6 +103,8 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Observer
 import io.mayu.birdpilot.detector.BirdDetector
 import io.mayu.birdpilot.detector.DetectorGate
+import io.mayu.birdpilot.detector.Hud
+import io.mayu.birdpilot.detector.hudState
 import io.mayu.birdpilot.finder.StillScan
 import io.mayu.birdpilot.overlay.RoiOverlay
 import kotlinx.coroutines.Dispatchers
@@ -126,6 +128,9 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 private const val TAG = "BirdPilot"
+private const val PERCH_COOLDOWN_MS = 1200L
+private const val MAX_ASSIST_X = 2.0f
+private const val ASSIST_X = 1.6f
 class MainActivity : ComponentActivity() {
     private var previewView: PreviewView? = null
     private var imageCapture: ImageCapture? = null
@@ -512,32 +517,49 @@ private fun CameraPreview(
     var roiScore by remember { mutableStateOf<Float?>(null) }
     var roiJudge by remember { mutableStateOf("—") }   // "GREEN"/"YELLOW" を入れる
     var perchAssistActive by remember { mutableStateOf(false) }
+    var lastHud by remember { mutableStateOf(Hud.YELLOW) }
+    var lastPerchAt by remember { mutableLongStateOf(0L) }
+
+    val perchAssistScope = rememberCoroutineScope()
 
     var gyroOmega by remember { mutableStateOf(0f) }      // ← これを1つだけ残す（L529の方を採用）
 
     val showRoiFn: (Rect, Float?) -> Unit = { r, score ->
         roi = r
         roiScore = score
-        perchAssistActive = (score != null && score >= roiTh)
-        Log.d(TAG, "ROI ${if (perchAssistActive) "GREEN" else "YELLOW"} score=${score ?: -1f}")
-        roiJudge = if ((score ?: -1f) >= roiTh) "GREEN" else "YELLOW"
+        val hud = hudState(score, roiTh)
+        val becameGreen = hud == Hud.GREEN && lastHud != Hud.GREEN
+        lastHud = hud
+        perchAssistActive = hud == Hud.GREEN
+        Log.d(TAG, "ROI ${hud.name} score=${score ?: -1f}")
+        roiJudge = hud.name
         Log.d(TAG, "HUD judge=$roiJudge score=${score ?: -1f}")
+
+        if (becameGreen) {
+            val now = SystemClock.uptimeMillis()
+            if (now - lastPerchAt >= PERCH_COOLDOWN_MS) {
+                val cam = currentCamera.value
+                val zoomState: ZoomState? = cam?.cameraInfo?.zoomState?.value
+                if (cam != null && zoomState != null) {
+                    val currentRatio = zoomState.zoomRatio
+                    val target = min(min(currentRatio * ASSIST_X, MAX_ASSIST_X), zoomState.maxZoomRatio)
+                    if (target > currentRatio) {
+                        lastPerchAt = now
+                        Log.d(TAG, "PA fire: $currentRatio -> $target")
+                        perchAssistScope.launch {
+                            withContext(Dispatchers.Main) {
+                                cam.cameraControl.setZoomRatio(target)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // --- C2 gate + logger (最小) ---
-    var lastDetectAt by remember { mutableLongStateOf(0L) }
-
     val tryEnsureBirdness: (PointF) -> Unit = { pt ->
-        val now = SystemClock.uptimeMillis()
-        val delta = now - lastDetectAt
-        if (delta < 500L) {
-            Log.d(TAG, "C2 skip: ${delta}ms (<500)")
-        } else {
-            lastDetectAt = now
-            Log.d(TAG, "C2 call: ensureBirdness at (${pt.x}, ${pt.y})")
-            // 位置引数で統一（名前付き引数は使わない）
-            StillScan.ensureBirdness(pt, previewView, detectorGate, birdDetector, showRoiFn)
-        }
+        StillScan.ensureBirdness(pt, previewView, detectorGate, birdDetector, showRoiFn)
     }
 
 

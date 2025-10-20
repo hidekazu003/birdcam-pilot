@@ -29,10 +29,7 @@ object StillScan {
     ) {
         when (val decision = gate.tryAcquire()) {
             is DetectorGate.Decision.Rejected -> {
-                Log.d(
-                    TAG,
-                    "C2 skip: gate ${decision.elapsedSinceLastMs}ms < ${gate.minIntervalMs}"
-                )
+                Log.d(TAG, "C2 skip: <${gate.minIntervalMs}ms")
                 return
             }
             is DetectorGate.Decision.Accepted -> {
@@ -65,7 +62,7 @@ object StillScan {
 
             val score = result?.score
             if (score != null) {
-                Log.d(TAG, "C2 call score=${String.format(Locale.US, "%.3f", score)}")
+                Log.d(TAG, "C2 call: score=${String.format(Locale.US, "%.3f", score)}")
             }
 
             withContext(Dispatchers.Main) { showRoi(crop.rect, score) }
