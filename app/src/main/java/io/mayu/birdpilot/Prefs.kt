@@ -33,6 +33,19 @@ suspend fun setRoiFrameScale(context: Context, value: Float) {
     context.cameraPreferenceDataStore.edit { it[ROI_FRAME_SCALE_KEY] = v }
 }
 
+// --- HUD visibility toggle ---------------------------------------------------
+private val HUD_ENABLED_KEY = booleanPreferencesKey("hud_enabled")
+
+/** HUDの表示可否（既定 true） */
+fun hudEnabledFlow(context: Context): Flow<Boolean> =
+    context.cameraPreferenceDataStore.data.map { it[HUD_ENABLED_KEY] ?: true }
+
+/** HUDの表示可否を保存 */
+suspend fun setHudEnabled(context: Context, enabled: Boolean) {
+    context.cameraPreferenceDataStore.edit { it[HUD_ENABLED_KEY] = enabled }
+}
+
+
 // DataStore (Preferences) をアプリ全体で共有
 val Context.cameraPreferenceDataStore by preferencesDataStore(name = "camera_preferences")
 

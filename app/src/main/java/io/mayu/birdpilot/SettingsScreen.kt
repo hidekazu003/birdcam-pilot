@@ -36,6 +36,9 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import androidx.compose.material3.Slider
 import java.util.Locale
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+
 
 // Prefs のAPIを使う場合（おすすめ）
 import io.mayu.birdpilot.roiThresholdFlow
@@ -63,11 +66,14 @@ fun SettingsScreen(
     val finderProfile by finderProfileFlow.collectAsState(initial = FinderProfile.OUTDOOR)
 
     Surface(color = Color.Black, modifier = Modifier.fillMaxSize()) {
+        val scroll = rememberScrollState()
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
                 .statusBarsPadding()
+                .verticalScroll(scroll)
                 .padding(horizontal = 16.dp, vertical = 24.dp),
             verticalArrangement = Arrangement.Top
         ) {
@@ -250,7 +256,33 @@ fun SettingsScreen(
                         )
                     }
                 }
+
             }
+
+            // HUD_TOGGLE_BEGIN
+            val hudEnabled by hudEnabledFlow(context).collectAsState(initial = true)
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 24.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "HUD表示",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                Switch(
+                    checked = hudEnabled,
+                    onCheckedChange = { v ->
+                        coroutineScope.launch { setHudEnabled(context, v) }
+                    }
+                )
+            }
+            // HUD_TOGGLE_END
+
 
         }
 
