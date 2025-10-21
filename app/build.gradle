@@ -67,6 +67,8 @@ dependencies {
 
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
+    testImplementation 'junit:junit:4.13.2'
+
 }
 
 // --- C1 verify task (Groovy DSL) ---
@@ -96,7 +98,11 @@ tasks.register("verifyC1") {
     }
 }
 
+// Aggregate task for C2 checks (HUD consistency etc.)
 tasks.register("verifyC2") {
+    group = "verification"               // ← カテゴリ表示用（"other"から移動）
+    description = "Run HUD consistency tests and lint"
     dependsOn("testDebugUnitTest", "lint")
 }
+
 

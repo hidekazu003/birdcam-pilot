@@ -49,6 +49,10 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import android.os.Build
+import android.graphics.BitmapFactory
+import android.media.ThumbnailUtils
+
 
 @Composable
 fun GalleryScreen(
@@ -206,7 +210,20 @@ private fun GalleryThumbnail(
     LaunchedEffect(uri) {
         bitmap = withContext(Dispatchers.IO) {
             runCatching {
-                context.contentResolver.loadThumbnail(uri, Size(200, 200), null)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    context.contentResolver.loadThumbnail(uri, Size(200, 200), null)
+                } else {
+                    context.contentResolver.openInputStream(uri)?.use { ins ->
+                        BitmapFactory.decodeStream(ins)?.let { bm ->
+                            ThumbnailUtils.extractThumbnail(
+                                bm,
+                                200, 200,
+                                ThumbnailUtils.OPTIONS_RECYCLE_INPUT
+                            )
+                        }
+                    }
+                }
+
             }.getOrNull()
         }
     }
