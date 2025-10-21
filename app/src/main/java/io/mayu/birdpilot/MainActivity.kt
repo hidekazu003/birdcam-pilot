@@ -498,6 +498,7 @@ private fun CameraPreview(
 ) {
     val context = LocalContext.current
     val roiTh by roiThresholdFlow(context).collectAsState(initial = 0.4f)
+    val hudEnabled by hudEnabledFlow(context).collectAsState(initial = true)
     val frameScale by roiFrameScaleFlow(context).collectAsState(initial = 1.0f)
     val activity = context as? MainActivity
     val executor = remember { ContextCompat.getMainExecutor(context) }
@@ -539,7 +540,7 @@ private fun CameraPreview(
             right  = (cx + halfW).coerceIn(left + 1, w.coerceAtLeast(left + 1))
             bottom = (cy + halfH).coerceIn(top + 1,  h.coerceAtLeast(top + 1))
         }
-        roi = scaled
+        roi = if (hudEnabled) scaled else null
         roiScore = score
 
         val hud = hudState(score, roiTh)
@@ -1154,15 +1155,20 @@ private fun CameraPreview(
             )
 
             // HUD: ROI の判定と score を右上に表示
-            Text(
-                text = "ROI $roiJudge  score=${String.format(Locale.US, "%.2f", roiScore ?: -1f)}",
-                color = Color.White,
-                fontSize = 14.sp,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0x88000000))
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-            )
+            // HUD_TOGGLE_TEXT_BEGIN
+            if (hudEnabled) {
+                Text(
+                    text = "ROI $roiJudge  score=${String.format(Locale.US, "%.2f", roiScore ?: -1f)}",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color(0x88000000))
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
+            // HUD_TOGGLE_TEXT_END
+
 
             FinderToggleButton(
                 isEnabled = finderEnabled,
